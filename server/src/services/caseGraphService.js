@@ -1,0 +1,332 @@
+const mongoose = require("mongoose");
+const { Case, Entity, Edge, Pattern } = require("../models");
+const { NotFoundError, ValidationError, BadRequestError } = require("../utils/AppError");
+
+/**
+ * Retrieve the full graph (nodes + edges) for a given case
+ *
+ * @param {string} caseId - Case identifier
+ * @returns {Promise<{ caseId: string, status: string, nodes: any[], edges: any[] }>}
+ */
+const getCaseGraph = async (caseId) => {
+  if (!caseId || typeof caseId !== "string" || !caseId.trim()) {
+    throw new ValidationError("A valid caseId parameter is required", "INVALID_CASE_ID");
+  }
+
+  const normalizedCaseId = caseId.trim();
+
+  // Verify Case exists
+  const caseDoc = await Case.findOne({ caseId: normalizedCaseId }).lean();
+  if (!caseDoc) {
+    throw new NotFoundError(`Case '${normalizedCaseId}' not found`, "CASE_NOT_FOUND");
+  }
+
+  // Fetch all entities belonging exclusively to this case
+  const entities = await Entity.find({ caseId: normalizedCaseId }).lean();
+
+  // Fetch all edges belonging exclusively to this case
+  const edges = await Edge.find({ caseId: normalizedCaseId }).lean();
+
+  const nodes = entities.map((entity) => ({
+    canonicalId: entity.canonicalId,
+    type: entity.type,
+    aliases: entity.aliases || [],
+    attributes: entity.attributes || {},
+    confidence: entity.confidence,
+    createdAt: entity.createdAt,
+  }));
+
+  const mappedEdges = edges.map((edge) => ({
+    id: edge._id.toString(),
+    source: edge.source,
+    target: edge.target,
+    edgeType: edge.edgeType,
+    confidence: edge.confidence,
+    timestamp: edge.timestamp || null,
+    evidence: edge.evidence || [],
+    guardrailStatus: edge.guardrailStatus || null,
+    guardrailRationale: edge.guardrailRationale || null,
+    attributes: edge.attributes || {},
+    createdAt: edge.createdAt,
+  }));
+
+  return {
+    caseId: normalizedCaseId,
+    status: caseDoc.status,
+    nodes,
+    edges: mappedEdges,
+  };
+};
+
+/**
+ * Retrieve detailed entity profile with its related edges within the case
+ *
+ * @param {string} caseId - Case identifier
+ * @param {string} entityId - Entity canonicalId
+ * @returns {Promise<{ caseId: string, entity: Object, relatedEdges: any[] }>}
+ */
+const getEntityDetail = async (caseId, entityId) => {
+  if (!caseId || typeof caseId !== "string" || !caseId.trim()) {
+    throw new ValidationError("A valid caseId parameter is required", "INVALID_CASE_ID");
+  }
+  if (!entityId || typeof entityId !== "string" || !entityId.trim()) {
+    throw new ValidationError("A valid entityId parameter is required", "INVALID_ENTITY_ID");
+  }
+
+  const normalizedCaseId = caseId.trim();
+  const normalizedEntityId = entityId.trim();
+
+  // Verify Case exists
+  const caseDoc = await Case.findOne({ caseId: normalizedCaseId }).lean();
+  if (!caseDoc) {
+    throw new NotFoundError(`Case '${normalizedCaseId}' not found`, "CASE_NOT_FOUND");
+  }
+
+  // Fetch target entity scoped to caseId
+  const entity = await Entity.findOne({
+    caseId: normalizedCaseId,
+    canonicalId: normalizedEntityId,
+  }).lean();
+
+  if (!entity) {
+    throw new NotFoundError(
+      `Entity '${normalizedEntityId}' not found in case '${normalizedCaseId}'`,
+      "ENTITY_NOT_FOUND"
+    );
+  }
+
+  // Fetch only related edges within the same case
+  const relatedEdges = await Edge.find({
+    caseId: normalizedCaseId,
+    $or: [{ source: normalizedEntityId }, { target: normalizedEntityId }],
+  }).lean();
+
+  const mappedEdges = relatedEdges.map((edge) => ({
+    id: edge._id.toString(),
+    source: edge.source,
+    target: edge.target,
+    edgeType: edge.edgeType,
+    confidence: edge.confidence,
+    timestamp: edge.timestamp || null,
+    evidence: edge.evidence || [],
+    guardrailStatus: edge.guardrailStatus || null,
+    guardrailRationale: edge.guardrailRationale || null,
+    attributes: edge.attributes || {},
+  }));
+
+  return {
+    caseId: normalizedCaseId,
+    entity: {
+      canonicalId: entity.canonicalId,
+      type: entity.type,
+      aliases: entity.aliases || [],
+      attributes: entity.attributes || {},
+      confidence: entity.confidence,
+      createdAt: entity.createdAt,
+      updatedAt: entity.updatedAt,
+    },
+    relatedEdges: mappedEdges,
+  };
+};
+
+/**
+ * Retrieve chronologically ordered interaction timeline for a case
+ *
+ * @param {string} caseId - Case identifier
+ * @returns {Promise<{ caseId: string, totalEvents: number, timeline: any[] }>}
+ */
+const getCaseTimeline = async (caseId) => {
+  if (!caseId || typeof caseId !== "string" || !caseId.trim()) {
+    throw new ValidationError("A valid caseId parameter is required", "INVALID_CASE_ID");
+  }
+
+  const normalizedCaseId = caseId.trim();
+
+  // Verify Case exists
+  const caseDoc = await Case.findOne({ caseId: normalizedCaseId }).lean();
+  if (!caseDoc) {
+    throw new NotFoundError(`Case '${normalizedCaseId}' not found`, "CASE_NOT_FOUND");
+  }
+
+  // Fetch all edges for the case
+  const edges = await Edge.find({ caseId: normalizedCaseId }).lean();
+
+  // Deterministic chronological ordering:
+  // 1. Edges with domain event timestamps: sorted oldest -> newest (ascending)
+  // 2. Edges without domain timestamps: placed after timestamped events, ordered by createdAt
+  const sortedEdges = edges.sort((a, b) => {
+    if (a.timestamp && b.timestamp) {
+      return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
+    }
+    if (a.timestamp && !b.timestamp) return -1; // timestamped items first
+    if (!a.timestamp && b.timestamp) return 1;
+    // Both without event timestamps -> fallback to createdAt
+    return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+  });
+
+  const timeline = sortedEdges.map((edge) => ({
+    id: edge._id.toString(),
+    source: edge.source,
+    target: edge.target,
+    edgeType: edge.edgeType,
+    timestamp: edge.timestamp || null,
+    evidence: edge.evidence || [],
+    confidence: edge.confidence,
+    guardrailStatus: edge.guardrailStatus || null,
+    guardrailRationale: edge.guardrailRationale || null,
+    attributes: edge.attributes || {},
+    createdAt: edge.createdAt,
+  }));
+
+  return {
+    caseId: normalizedCaseId,
+    totalEvents: timeline.length,
+    timeline,
+  };
+};
+
+/**
+ * Retrieve guardrail and evidence metadata for a specific edge in a case
+ *
+ * @param {string} caseId - Case identifier
+ * @param {string} edgeId - Edge MongoDB _id
+ * @returns {Promise<{ caseId: string, edgeId: string, edge: Object }>}
+ */
+const getGuardrailDetail = async (caseId, edgeId) => {
+  if (!caseId || typeof caseId !== "string" || !caseId.trim()) {
+    throw new ValidationError("A valid caseId parameter is required", "INVALID_CASE_ID");
+  }
+  if (!edgeId || typeof edgeId !== "string" || !edgeId.trim()) {
+    throw new ValidationError("A valid edgeId parameter is required", "INVALID_EDGE_ID");
+  }
+
+  const normalizedCaseId = caseId.trim();
+  const normalizedEdgeId = edgeId.trim();
+
+  // Verify Case exists
+  const caseDoc = await Case.findOne({ caseId: normalizedCaseId }).lean();
+  if (!caseDoc) {
+    throw new NotFoundError(`Case '${normalizedCaseId}' not found`, "CASE_NOT_FOUND");
+  }
+
+  // Validate ObjectId format
+  if (!mongoose.Types.ObjectId.isValid(normalizedEdgeId)) {
+    throw new NotFoundError(
+      `Edge '${normalizedEdgeId}' not found in case '${normalizedCaseId}'`,
+      "EDGE_NOT_FOUND"
+    );
+  }
+
+  // Find Edge scoped by BOTH _id and caseId to guarantee strict case isolation
+  const edge = await Edge.findOne({
+    _id: normalizedEdgeId,
+    caseId: normalizedCaseId,
+  }).lean();
+
+  if (!edge) {
+    throw new NotFoundError(
+      `Edge '${normalizedEdgeId}' not found in case '${normalizedCaseId}'`,
+      "EDGE_NOT_FOUND"
+    );
+  }
+
+  return {
+    caseId: normalizedCaseId,
+    edgeId: edge._id.toString(),
+    edge: {
+      source: edge.source,
+      target: edge.target,
+      edgeType: edge.edgeType,
+      confidence: edge.confidence,
+      timestamp: edge.timestamp || null,
+      evidence: edge.evidence || [],
+      guardrailStatus: edge.guardrailStatus || "unspecified",
+      guardrailRationale: edge.guardrailRationale || null,
+      attributes: edge.attributes || {},
+      createdAt: edge.createdAt,
+    },
+  };
+};
+
+/**
+ * Retrieve all investigation cases (newest first) with per-case entity/edge counts
+ * for the dashboard list view.
+ *
+ * Counts are computed with batched aggregations to avoid N+1 queries.
+ *
+ * @returns {Promise<{ total: number, cases: any[] }>}
+ */
+const getCasesList = async () => {
+  const caseDocs = await Case.find(
+    {},
+    { caseId: 1, status: 1, title: 1, sourceUploads: 1, createdAt: 1, updatedAt: 1 }
+  )
+    .sort({ updatedAt: -1 })
+    .lean();
+
+  if (!Array.isArray(caseDocs) || caseDocs.length === 0) {
+    return { total: 0, cases: [] };
+  }
+
+  const caseIds = caseDocs.map((caseDoc) => caseDoc.caseId);
+
+  const [entityCounts, edgeCounts] = await Promise.all([
+    Entity.aggregate([
+      { $match: { caseId: { $in: caseIds } } },
+      { $group: { _id: "$caseId", count: { $sum: 1 } } },
+    ]),
+    Edge.aggregate([
+      { $match: { caseId: { $in: caseIds } } },
+      { $group: { _id: "$caseId", count: { $sum: 1 } } },
+    ]),
+  ]);
+
+  const entityCountMap = new Map(entityCounts.map((row) => [row._id, row.count]));
+  const edgeCountMap = new Map(edgeCounts.map((row) => [row._id, row.count]));
+
+  const cases = caseDocs.map((caseDoc) => {
+    const uploads = Array.isArray(caseDoc.sourceUploads) ? caseDoc.sourceUploads : [];
+
+    const recordCount = uploads.reduce(
+      (sum, upload) => sum + (typeof upload?.recordCount === "number" ? upload.recordCount : 0),
+      0
+    );
+
+    let lastUploadAt = null;
+    for (const upload of uploads) {
+      if (!upload?.uploadedAt) continue;
+      const uploadedAt = new Date(upload.uploadedAt);
+      if (!Number.isNaN(uploadedAt.getTime()) && (!lastUploadAt || uploadedAt > lastUploadAt)) {
+        lastUploadAt = uploadedAt;
+      }
+    }
+
+    return {
+      caseId: caseDoc.caseId,
+      status: caseDoc.status || "pending",
+      title: caseDoc.title || null,
+      recordCount,
+      uploadsCount: uploads.length,
+      lastUploadAt,
+      entitiesCount: entityCountMap.get(caseDoc.caseId) || 0,
+      edgesCount: edgeCountMap.get(caseDoc.caseId) || 0,
+      createdAt: caseDoc.createdAt,
+      updatedAt: caseDoc.updatedAt,
+    };
+  });
+
+  return {
+    total: cases.length,
+    cases,
+  };
+};
+
+module.exports = {
+  NotFoundError,
+  ValidationError,
+  getCaseGraph,
+  getEntityDetail,
+  getCaseTimeline,
+  getGuardrailDetail,
+  getCasesList,
+};
