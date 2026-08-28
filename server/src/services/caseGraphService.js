@@ -21,11 +21,11 @@ const getCaseGraph = async (caseId) => {
     throw new NotFoundError(`Case '${normalizedCaseId}' not found`, "CASE_NOT_FOUND");
   }
 
-  // Fetch all entities belonging exclusively to this case
-  const entities = await Entity.find({ caseId: normalizedCaseId }).lean();
+  // Fetch ALL entities to render the Master Graph context
+  const entities = await Entity.find({}).lean();
 
-  // Fetch all edges belonging exclusively to this case
-  const edges = await Edge.find({ caseId: normalizedCaseId }).lean();
+  // Fetch ALL edges to render the Master Graph context
+  const edges = await Edge.find({}).lean();
 
   const nodes = entities.map((entity) => ({
     canonicalId: entity.canonicalId,
@@ -33,6 +33,7 @@ const getCaseGraph = async (caseId) => {
     aliases: entity.aliases || [],
     attributes: entity.attributes || {},
     confidence: entity.confidence,
+    associatedCases: entity.associatedCases || [],
     createdAt: entity.createdAt,
   }));
 
@@ -47,6 +48,7 @@ const getCaseGraph = async (caseId) => {
     guardrailStatus: edge.guardrailStatus || null,
     guardrailRationale: edge.guardrailRationale || null,
     attributes: edge.attributes || {},
+    associatedCases: edge.associatedCases || [],
     createdAt: edge.createdAt,
   }));
 
@@ -82,22 +84,20 @@ const getEntityDetail = async (caseId, entityId) => {
     throw new NotFoundError(`Case '${normalizedCaseId}' not found`, "CASE_NOT_FOUND");
   }
 
-  // Fetch target entity scoped to caseId
+  // Fetch target entity globally (master graph)
   const entity = await Entity.findOne({
-    caseId: normalizedCaseId,
     canonicalId: normalizedEntityId,
   }).lean();
 
   if (!entity) {
     throw new NotFoundError(
-      `Entity '${normalizedEntityId}' not found in case '${normalizedCaseId}'`,
+      `Entity '${normalizedEntityId}' not found`,
       "ENTITY_NOT_FOUND"
     );
   }
 
-  // Fetch only related edges within the same case
+  // Fetch only related edges globally (master graph)
   const relatedEdges = await Edge.find({
-    caseId: normalizedCaseId,
     $or: [{ source: normalizedEntityId }, { target: normalizedEntityId }],
   }).lean();
 
@@ -148,8 +148,10 @@ const getCaseTimeline = async (caseId) => {
     throw new NotFoundError(`Case '${normalizedCaseId}' not found`, "CASE_NOT_FOUND");
   }
 
-  // Fetch all edges for the case
-  const edges = await Edge.find({ caseId: normalizedCaseId }).lean();
+  // Fetch all edges for the case (supporting both legacy caseId and new Master Graph associatedCases)
+  const edges = await Edge.find({
+    $or: [{ associatedCases: normalizedCaseId }, { caseId: normalizedCaseId }],
+  }).lean();
 
   // Deterministic chronological ordering:
   // 1. Edges with domain event timestamps: sorted oldest -> newest (ascending)
@@ -217,10 +219,10 @@ const getGuardrailDetail = async (caseId, edgeId) => {
     );
   }
 
-  // Find Edge scoped by BOTH _id and caseId to guarantee strict case isolation
+  // Find Edge scoped by BOTH _id and case isolation
   const edge = await Edge.findOne({
     _id: normalizedEdgeId,
-    caseId: normalizedCaseId,
+    $or: [{ associatedCases: normalizedCaseId }, { caseId: normalizedCaseId }],
   }).lean();
 
   if (!edge) {
@@ -270,19 +272,37 @@ const getCasesList = async () => {
 
   const caseIds = caseDocs.map((caseDoc) => caseDoc.caseId);
 
-  const [entityCounts, edgeCounts] = await Promise.all([
+  const [entityCounts, edgeCounts, patternsList] = await Promise.all([
     Entity.aggregate([
-      { $match: { caseId: { $in: caseIds } } },
-      { $group: { _id: "$caseId", count: { $sum: 1 } } },
+      { $match: { associatedCases: { $in: caseIds } } },
+      { $unwind: "$associatedCases" },
+      { $match: { associatedCases: { $in: caseIds } } },
+      { $group: { _id: "$associatedCases", count: { $sum: 1 } } },
     ]),
     Edge.aggregate([
-      { $match: { caseId: { $in: caseIds } } },
-      { $group: { _id: "$caseId", count: { $sum: 1 } } },
+      { $match: { associatedCases: { $in: caseIds } } },
+      { $unwind: "$associatedCases" },
+      { $match: { associatedCases: { $in: caseIds } } },
+      { $group: { _id: "$associatedCases", count: { $sum: 1 } } },
     ]),
+    Pattern.find({ caseId: { $in: caseIds } }).lean(),
   ]);
 
   const entityCountMap = new Map(entityCounts.map((row) => [row._id, row.count]));
   const edgeCountMap = new Map(edgeCounts.map((row) => [row._id, row.count]));
+  
+  const patternMap = new Map();
+  for (const p of patternsList) {
+    if (!patternMap.has(p.caseId)) {
+      patternMap.set(p.caseId, []);
+    }
+    patternMap.get(p.caseId).push({
+      patternType: p.patternType,
+      description: p.description,
+      severity: p.severity,
+      confidence: p.confidence
+    });
+  }
 
   const cases = caseDocs.map((caseDoc) => {
     const uploads = Array.isArray(caseDoc.sourceUploads) ? caseDoc.sourceUploads : [];
@@ -310,6 +330,7 @@ const getCasesList = async () => {
       lastUploadAt,
       entitiesCount: entityCountMap.get(caseDoc.caseId) || 0,
       edgesCount: edgeCountMap.get(caseDoc.caseId) || 0,
+      patterns: patternMap.get(caseDoc.caseId) || [],
       createdAt: caseDoc.createdAt,
       updatedAt: caseDoc.updatedAt,
     };

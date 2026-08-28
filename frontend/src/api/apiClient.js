@@ -2,10 +2,10 @@ import axios from 'axios';
 
 /**
  * Centralized API client.
- * Single source of truth for the backend base URL.
- * Configure via VITE_API_BASE_URL in .env (see .env.example).
+ * In development: requests go to Vite's dev server proxy (/api → localhost:5000/api).
+ * In production: set VITE_API_BASE_URL to your deployed backend URL.
  */
-const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5000/api';
+const BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api';
 
 const apiClient = axios.create({
   baseURL: BASE_URL,

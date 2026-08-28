@@ -12,16 +12,18 @@ class PersistenceError extends AppError {
 }
 
 /**
- * Deduplicate and serialize evidence item for collision checking
+ * Deduplicate evidence item — serialize to a stable key for Set-based collision checking.
+ * Field names MUST match EvidenceItem Pydantic model in reasoning-service AND Edge.js evidenceItemSchema.
+ *   sourceReportId  ← FastAPI field (was incorrectly "sourceType")
+ *   matchedField    ← FastAPI field (was incorrectly "field")
+ *   record          ← unchanged
  */
 const serializeEvidenceItem = (item) => {
   if (!item || typeof item !== "object") return "";
   return JSON.stringify({
-    sourceType: item.sourceType || "",
+    sourceReportId: item.sourceReportId || "",
+    matchedField: item.matchedField || "",
     record: item.record !== undefined ? item.record : "",
-    field: item.field || "",
-    value: item.value !== undefined ? item.value : "",
-    citation: item.citation || "",
   });
 };
 
@@ -89,6 +91,19 @@ const persistCaseResults = async (fastApiResult, intakeMetadata = {}) => {
 
   const caseId = fastApiResult.caseId.trim();
 
+  // Build a per-edge guardrail lookup from the guardrail array BEFORE the persistence loop.
+  // FastAPI returns guardrail[] as GuardrailItem[] with { edgeId, status, rationale }.
+  // Each RelationshipModel carries its own edgeId — we must match them 1:1.
+  // The previous implementation used guardrail[0] as a global fallback for ALL edges,
+  // which incorrectly applied a single guardrail decision to every relationship.
+  const guardrailMap = new Map(
+    Array.isArray(fastApiResult.guardrail)
+      ? fastApiResult.guardrail
+          .filter((g) => g && typeof g.edgeId === "string" && g.edgeId.trim())
+          .map((g) => [g.edgeId.trim(), g])
+      : []
+  );
+
   // Try to use a MongoDB transaction session if supported by deployment
   let session = null;
   let useTransaction = false;
@@ -105,6 +120,7 @@ const persistCaseResults = async (fastApiResult, intakeMetadata = {}) => {
 
   try {
     const sessionOption = session ? { session } : {};
+
 
     // -------------------------------------------------------------
     // 2. Persist / Update Case Document
@@ -164,13 +180,13 @@ const persistCaseResults = async (fastApiResult, intakeMetadata = {}) => {
         rawEntity.attributes && typeof rawEntity.attributes === "object" ? rawEntity.attributes : {};
       const newConfidence = typeof rawEntity.confidence === "number" ? rawEntity.confidence : 1.0;
 
-      let existingEntity = await Entity.findOne({ caseId, canonicalId }, null, sessionOption);
+      let existingEntity = await Entity.findOne({ canonicalId }, null, sessionOption);
 
       if (!existingEntity) {
         const created = await Entity.create(
           [
             {
-              caseId,
+              associatedCases: [caseId],
               canonicalId,
               type,
               aliases: newAliases,
@@ -183,6 +199,8 @@ const persistCaseResults = async (fastApiResult, intakeMetadata = {}) => {
         savedEntities.push(created[0]);
       } else {
         // Deterministic Merge:
+        existingEntity.associatedCases = Array.from(new Set([...(existingEntity.associatedCases || []), caseId]));
+        
         // 1. Aliases: Merge array, remove duplicates, preserve existing
         const mergedAliases = Array.from(new Set([...existingEntity.aliases, ...newAliases]));
         existingEntity.aliases = mergedAliases;
@@ -216,25 +234,26 @@ const persistCaseResults = async (fastApiResult, intakeMetadata = {}) => {
 
       const confidence = typeof rel.confidence === "number" ? rel.confidence : 1.0;
       const timestamp = rel.timestamp ? new Date(rel.timestamp) : undefined;
-      const guardrailStatus =
-        rel.guardrailStatus ||
-        (Array.isArray(fastApiResult.guardrail) && fastApiResult.guardrail[0]?.status) ||
-        undefined;
-      const guardrailRationale =
-        rel.guardrailRationale ||
-        (Array.isArray(fastApiResult.guardrail) && fastApiResult.guardrail[0]?.rationale) ||
-        undefined;
+
+      // Look up guardrail decision for THIS specific edge by its edgeId.
+      // RelationshipModel.edgeId from FastAPI is the key that joins to GuardrailItem.edgeId.
+      // NEVER use guardrail[0] as a global fallback — that incorrectly applies one guardrail
+      // decision to all edges regardless of which edge it was computed for.
+      const edgeGuardrail = rel.edgeId ? guardrailMap.get(rel.edgeId.trim()) : undefined;
+      const guardrailStatus = edgeGuardrail?.status || undefined;
+      const guardrailRationale = edgeGuardrail?.rationale || undefined;
+
       const incomingEvidence = Array.isArray(rel.evidence) ? rel.evidence : [];
 
-      // Edge identity lookup query for deduplication
-      const edgeQuery = { caseId, source, target, edgeType };
+      // Edge identity lookup query for deduplication globally
+      const edgeQuery = { source, target, edgeType };
       let existingEdge = await Edge.findOne(edgeQuery, null, sessionOption);
 
       if (!existingEdge) {
         const created = await Edge.create(
           [
             {
-              caseId,
+              associatedCases: [caseId],
               source,
               target,
               edgeType,
@@ -250,6 +269,8 @@ const persistCaseResults = async (fastApiResult, intakeMetadata = {}) => {
         );
         savedEdges.push(created[0]);
       } else {
+        existingEdge.associatedCases = Array.from(new Set([...(existingEdge.associatedCases || []), caseId]));
+        
         // Deduplicate and accumulate new evidence items
         const existingEvidenceKeys = new Set(existingEdge.evidence.map(serializeEvidenceItem));
 

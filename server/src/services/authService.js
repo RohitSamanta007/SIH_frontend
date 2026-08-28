@@ -78,8 +78,8 @@ const seedDefaultInvestigator = async () => {
   try {
     const userCount = await User.countDocuments();
     if (userCount === 0) {
-      const username = env.DEFAULT_INVESTIGATOR_USERNAME;
-      const password = env.DEFAULT_INVESTIGATOR_PASSWORD;
+      const username = env.DEFAULT_INVESTIGATOR_USERNAME || "investigator";
+      const password = env.DEFAULT_INVESTIGATOR_PASSWORD || "investigator123";
 
       await User.create({
         username,

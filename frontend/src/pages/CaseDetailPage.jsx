@@ -1,16 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import {
-  ReactFlow,
-  ReactFlowProvider,
-  Background,
-  Controls,
-  Handle,
-  Position,
-} from '@xyflow/react';
-import '@xyflow/react/dist/style.css';
 import apiClient from '../api/apiClient.js';
 import { useAuth } from '../state/authContext.jsx';
+import NetworkGraph from '../components/graph/NetworkGraph.jsx';
+import { useEntityLookup } from '../hooks/useEntityLookup.js';
 
 const CARD_SHADOW =
   '0 0 0 1px rgba(0,0,0,0.08), 0px 2px 2px rgba(0,0,0,0.04), 0px 8px 16px -4px rgba(0,0,0,0.04)';
@@ -20,6 +13,9 @@ const STATUS_BADGE_CLASSES = {
   failed: 'bg-[#f7d4d6] text-[#c50000]',
   pending: 'bg-[#ffefcf] text-[#ab570a]',
   processing: 'bg-[#ffefcf] text-[#ab570a]',
+  verified: 'bg-[#d1fae5] text-[#065f46]',
+  rejected: 'bg-[#fee2e2] text-[#991b1b]',
+  unspecified: 'bg-[#f3f4f6] text-[#374151]',
 };
 
 const GRAPH_LAYOUT_COLUMNS = 4;
@@ -50,43 +46,7 @@ function StatusBadge({ status }) {
   );
 }
 
-function EntityNode({ data }) {
-  return (
-    <div className="min-w-[150px] max-w-[220px] cursor-pointer rounded-md border border-[#ebebeb] bg-white px-3 py-2 transition-colors hover:border-[#a1a1a1]">
-      {data.type && (
-        <p className="font-mono text-[10px] uppercase leading-4 tracking-wide text-[#888888]">
-          {data.type}
-        </p>
-      )}
-      <p className="truncate text-sm font-medium tracking-[-0.28px] text-[#171717]" title={data.canonicalId}>
-        {data.canonicalId}
-      </p>
-      {data.aliases.length > 0 && (
-        <p
-          className="truncate font-mono text-xs leading-4 text-[#4d4d4d]"
-          title={data.aliases.join(', ')}
-        >
-          aka {data.aliases.join(', ')}
-        </p>
-      )}
-      {typeof data.confidence === 'number' && (
-        <p className="font-mono text-xs leading-4 text-[#4d4d4d]">confidence {data.confidence}</p>
-      )}
-      <Handle
-        type="target"
-        position={Position.Top}
-        className="!h-1.5 !w-1.5 !border-none !bg-[#a1a1a1]"
-      />
-      <Handle
-        type="source"
-        position={Position.Bottom}
-        className="!h-1.5 !w-1.5 !border-none !bg-[#a1a1a1]"
-      />
-    </div>
-  );
-}
-
-const NODE_TYPES = { entity: EntityNode };
+// Custom node types registry removed as NetworkGraph handles it internally
 
 function buildGraphPayload(graphData) {
   const rawNodes = Array.isArray(graphData?.nodes) ? graphData.nodes : [];
@@ -155,6 +115,81 @@ function buildGraphPayload(graphData) {
     }));
 
   return { flowNodes, flowEdges, unmappedNodes, unmappedEdges };
+}
+
+function TimelineEventRow({ event, index, getEntityName }) {
+  const [isExpanded, setIsExpanded] = useState(false);
+  const ts = formatTimelineTimestamp(event?.timestamp);
+  const source = typeof event?.source === 'string' ? event.source.trim() : '';
+  const target = typeof event?.target === 'string' ? event.target.trim() : '';
+  const edgeType = typeof event?.edgeType === 'string' ? event.edgeType.trim() : '';
+  const evidenceCount = Array.isArray(event?.evidence) ? event.evidence.length : null;
+
+  const sourceName = getEntityName(source);
+  const targetName = getEntityName(target);
+  
+  const key = typeof event?.id === 'string' && event.id.trim() ? event.id.trim() : `timeline-${index}`;
+
+  return (
+    <li key={key} className="flex flex-col border-b border-[#ebebeb] last:border-0 bg-white">
+      <button 
+        onClick={() => setIsExpanded(!isExpanded)}
+        className="flex w-full items-start gap-4 px-6 py-4 text-left hover:bg-[#fafafa] transition-colors focus:outline-none focus:bg-[#f5f5f5]"
+        aria-expanded={isExpanded}
+      >
+        <p className="w-44 shrink-0 font-mono text-xs leading-5 text-[#888888] pt-0.5">{ts ?? 'Undated'}</p>
+        <div className="min-w-0 flex-1">
+          <p className="truncate font-mono text-sm text-[#171717] font-medium" title={`${sourceName} ↔ ${targetName}`}>
+            {sourceName} <span className="text-[#a1a1a1] mx-1">↔</span> {targetName}
+          </p>
+          {(edgeType || evidenceCount !== null) && (
+            <p className="mt-1 font-mono text-xs uppercase tracking-wide text-[#888888]">
+              {edgeType && <span>{edgeType}</span>}
+              {edgeType && evidenceCount !== null && <span className="mx-1 text-[#ebebeb]">·</span>}
+              {evidenceCount !== null && <span>{evidenceCount} evidence {evidenceCount === 1 ? 'record' : 'records'}</span>}
+            </p>
+          )}
+        </div>
+        <div className="shrink-0 text-[#a1a1a1] pt-0.5 ml-2">
+          {isExpanded ? (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>
+          ) : (
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+          )}
+        </div>
+      </button>
+
+      {isExpanded && (
+        <div className="bg-[#fafafa] px-6 py-5 sm:pl-[216px] border-t border-[#ebebeb]">
+           <div className="mb-4">
+             <div className="flex items-center gap-3 mb-2">
+               <span className="font-mono text-xs uppercase tracking-wide text-[#888888]">AI Guardrail</span>
+               <StatusBadge status={event.guardrailStatus || 'unspecified'} />
+             </div>
+             <p className="text-sm text-[#4d4d4d] leading-relaxed">
+               {event.guardrailRationale || 'No rationale provided by AI engine.'}
+             </p>
+           </div>
+           
+           {evidenceCount > 0 && (
+             <div>
+               <p className="font-mono text-xs uppercase tracking-wide text-[#888888] mb-3">Evidence Records</p>
+               <div className="space-y-3">
+                 {event.evidence.map((ev, idx) => (
+                   <div key={idx} className="bg-white border border-[#ebebeb] rounded-md p-3">
+                     <p className="font-mono text-xs text-[#0761d1] mb-1.5 font-medium">{ev.matchedField}</p>
+                     <pre className="text-xs text-[#4d4d4d] font-mono whitespace-pre-wrap break-words bg-[#fafafa] p-2 rounded border border-[#f5f5f5]">
+                       {typeof ev.record === 'object' ? JSON.stringify(ev.record, null, 2) : String(ev.record)}
+                     </pre>
+                   </div>
+                 ))}
+               </div>
+             </div>
+           )}
+        </div>
+      )}
+    </li>
+  );
 }
 
 export default function CaseDetailPage() {
@@ -378,6 +413,7 @@ export default function CaseDetailPage() {
     navigate('/login', { replace: true });
   }
 
+  const { getEntityName } = useEntityLookup(graphData?.nodes || []);
   const graph = useMemo(() => buildGraphPayload(graphData), [graphData]);
   const isEmptyGraph =
     fetchStatus === 'ready' && graph.flowNodes.length === 0 && graph.flowEdges.length === 0;
@@ -387,7 +423,7 @@ export default function CaseDetailPage() {
       {/* Nav bar */}
       <header className="h-16 bg-white border-b border-[#ebebeb] flex items-center justify-between px-6">
         <span className="font-mono text-xs text-[#888888] uppercase tracking-wide">
-          Case Intelligence
+          Trace-X
         </span>
         <div className="flex items-center gap-3">
           <span className="text-sm text-[#4d4d4d]">
@@ -519,23 +555,13 @@ export default function CaseDetailPage() {
                 </p>
               </div>
               <div className="h-[560px] w-full">
-                <ReactFlowProvider>
-                  <ReactFlow
-                    nodes={graph.flowNodes}
-                    edges={graph.flowEdges}
-                    nodeTypes={NODE_TYPES}
-                    fitView
-                    minZoom={0.15}
-                    maxZoom={2}
-                    nodesConnectable={false}
-                    elementsSelectable={false}
-                    onNodeClick={handleNodeClick}
-                    onEdgeClick={handleEdgeClick}
-                  >
-                    <Background color="#ebebeb" gap={16} />
-                    <Controls showInteractive={false} />
-                  </ReactFlow>
-                </ReactFlowProvider>
+                <NetworkGraph 
+                  graphData={{ nodes: graphData?.nodes || [], edges: graphData?.edges || [] }}
+                  onNodeClick={(id) => handleNodeClick(null, { id })}
+                  onEdgeClick={(id) => handleEdgeClick(null, { id })}
+                  activeTimeRange={null}
+                  currentCaseId={caseId}
+                />
               </div>
             </section>
           </>
@@ -607,56 +633,10 @@ export default function CaseDetailPage() {
             )}
 
             {timelineStatus === 'ready' && (
-              <ol className="divide-y divide-[#ebebeb]">
-                {timelineEvents.map((event, index) => {
-                  const ts = formatTimelineTimestamp(event?.timestamp);
-                  const source = typeof event?.source === 'string' ? event.source.trim() : '';
-                  const target = typeof event?.target === 'string' ? event.target.trim() : '';
-                  const edgeType =
-                    typeof event?.edgeType === 'string' ? event.edgeType.trim() : '';
-                  const evidenceCount = Array.isArray(event?.evidence) ? event.evidence.length : null;
-                  const key =
-                    typeof event?.id === 'string' && event.id.trim()
-                      ? event.id.trim()
-                      : `timeline-${index}`;
-                  return (
-                    <li
-                      key={key}
-                      className="flex flex-col gap-1 px-6 py-4 sm:flex-row sm:items-start sm:gap-6"
-                    >
-                      <p className="w-44 shrink-0 font-mono text-xs leading-5 text-[#888888]">{ts ?? 'Undated'}</p>
-                      <div className="min-w-0 flex-1">
-                        {(source || target) && (
-                          <p
-                            className="truncate font-mono text-sm text-[#171717]"
-                            title={`${source} → ${target}`}
-                          >
-                            {source && target ? (
-                              <>
-                                {source} <span className="text-[#a1a1a1]">→</span> {target}
-                              </>
-                            ) : (
-                              source || target
-                            )}
-                          </p>
-                        )}
-                        {(edgeType || evidenceCount !== null) && (
-                          <p className="mt-1 font-mono text-xs uppercase tracking-wide text-[#888888]">
-                            {edgeType && <span>{edgeType}</span>}
-                            {edgeType && evidenceCount !== null && (
-                              <span className="mx-1 text-[#ebebeb]">·</span>
-                            )}
-                            {evidenceCount !== null && (
-                              <span>
-                                {evidenceCount} evidence {evidenceCount === 1 ? 'record' : 'records'}
-                              </span>
-                            )}
-                          </p>
-                        )}
-                      </div>
-                    </li>
-                  );
-                })}
+              <ol className="divide-y divide-[#ebebeb] bg-[#fafafa]">
+                {timelineEvents.map((event, index) => (
+                  <TimelineEventRow key={event.id || index} event={event} index={index} getEntityName={getEntityName} />
+                ))}
               </ol>
             )}
           </section>
@@ -690,23 +670,69 @@ export default function CaseDetailPage() {
 
             {entityStatus === 'error' && (
               <div className="px-6 py-6">
-                <div className="rounded-md bg-[#f7d4d6] px-3 py-2 text-sm text-[#c50000]" role="alert">
-                  {entityError}
-                </div>
-                <div className="mt-4 flex items-center gap-3">
-                  <button
-                    onClick={() => fetchEntity(selectedEntityId)}
-                    className="h-8 rounded-md bg-[#171717] px-3 text-sm font-medium text-white transition-colors hover:bg-black"
-                  >
-                    Retry
-                  </button>
-                  <button
-                    onClick={closeEntityPanel}
-                    className="h-8 rounded-md border border-[#ebebeb] bg-white px-3 text-sm font-medium text-[#171717] transition-colors hover:bg-[#f5f5f5]"
-                  >
-                    Close
-                  </button>
-                </div>
+                {(() => {
+                  const fallbackEntity = (graphData?.nodes || []).find(n => n.canonicalId === selectedEntityId || n.id === selectedEntityId);
+                  if (fallbackEntity) {
+                    return (
+                      <div className="rounded-md border border-[#ebebeb] bg-[#fafafa] p-4">
+                        <div className="mb-4 flex items-center justify-between border-b border-[#ebebeb] pb-3">
+                          <div>
+                            <span className="inline-flex items-center rounded-full bg-[#fef08a] px-2 py-0.5 font-mono text-xs font-semibold text-[#854d0e]">
+                              Partial Data
+                            </span>
+                            <p className="mt-1 font-mono text-xs uppercase tracking-wide text-[#888888]">Cross-case API Fetch Failed</p>
+                          </div>
+                        </div>
+                        <div className="space-y-4">
+                          <div>
+                            <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Type</p>
+                            <p className="mt-1 text-sm text-[#171717]">{fallbackEntity.type || 'Unknown'}</p>
+                          </div>
+                          {Array.isArray(fallbackEntity.aliases) && fallbackEntity.aliases.length > 0 && (
+                            <div>
+                              <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Aliases</p>
+                              <ul className="mt-1 space-y-1">
+                                {fallbackEntity.aliases.map((alias, idx) => (
+                                  <li key={idx} className="font-mono text-sm text-[#4d4d4d]">{alias}</li>
+                                ))}
+                              </ul>
+                            </div>
+                          )}
+                          <div className="mt-4 pt-4 border-t border-[#ebebeb] flex items-center gap-3">
+                            <button onClick={() => fetchEntity(selectedEntityId)} className="h-8 rounded-md bg-[#171717] px-3 text-sm font-medium text-white transition-colors hover:bg-black">
+                              Retry Full Fetch
+                            </button>
+                            <button onClick={closeEntityPanel} className="h-8 rounded-md border border-[#ebebeb] bg-white px-3 text-sm font-medium text-[#171717] transition-colors hover:bg-[#f5f5f5]">
+                              Close
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  }
+                  
+                  return (
+                    <>
+                      <div className="rounded-md bg-[#f7d4d6] px-3 py-2 text-sm text-[#c50000]" role="alert">
+                        {entityError}
+                      </div>
+                      <div className="mt-4 flex items-center gap-3">
+                        <button
+                          onClick={() => fetchEntity(selectedEntityId)}
+                          className="h-8 rounded-md bg-[#171717] px-3 text-sm font-medium text-white transition-colors hover:bg-black"
+                        >
+                          Retry
+                        </button>
+                        <button
+                          onClick={closeEntityPanel}
+                          className="h-8 rounded-md border border-[#ebebeb] bg-white px-3 text-sm font-medium text-[#171717] transition-colors hover:bg-[#f5f5f5]"
+                        >
+                          Close
+                        </button>
+                      </div>
+                    </>
+                  );
+                })()}
               </div>
             )}
 

@@ -1,0 +1,32 @@
+services:
+  # 1. Node.js Backend API
+  - type: web
+    name: sih-server
+    env: node
+    rootDir: server
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: 10000
+      # Add your database URI or other env variables here
+      - key: MONGODB_URI
+        sync: false
+
+  # 2. React Frontend
+  - type: web # Using web service instead of static site for Vite preview, or you can use static site
+    name: sih-frontend
+    env: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    envVars:
+      # Use the Render internal URLs or external URLs for the backend APIs
+      - key: VITE_API_URL
+        fromService:
+          type: web
+          name: sih-server
+          envVarKey: RENDER_EXTERNAL_URL
+      # URL of your already-deployed FastAPI reasoning service
+      - key: VITE_REASONING_SERVICE_URL
+        value: "https://trace-x-d6ss.onrender.com"

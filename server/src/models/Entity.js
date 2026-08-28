@@ -6,16 +6,17 @@ const mongoose = require("mongoose");
  */
 const entitySchema = new mongoose.Schema(
   {
-    caseId: {
-      type: String,
-      required: [true, "caseId is required"],
-      trim: true,
+    associatedCases: {
+      type: [String],
+      default: [],
       index: true,
     },
     canonicalId: {
       type: String,
       required: [true, "canonicalId is required"],
       trim: true,
+      unique: true,
+      index: true,
     },
     type: {
       type: String,
@@ -44,11 +45,8 @@ const entitySchema = new mongoose.Schema(
   }
 );
 
-// Compound unique index ensuring canonicalId is unique within the case scope
-entitySchema.index({ caseId: 1, canonicalId: 1 }, { unique: true });
-
-// Compound index for querying entities by type within a case
-entitySchema.index({ caseId: 1, type: 1 });
+// Compound index for querying entities by type
+entitySchema.index({ type: 1 });
 
 const Entity = mongoose.model("Entity", entitySchema);
 

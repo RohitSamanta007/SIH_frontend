@@ -44,7 +44,7 @@ export default function LoginPage() {
         >
           {/* Eyebrow */}
           <p className="font-mono text-xs text-[#888888] uppercase tracking-wide">
-            Case Intelligence
+            Trace-X
           </p>
 
           {/* Headline */}

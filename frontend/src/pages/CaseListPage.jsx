@@ -244,7 +244,7 @@ export default function CaseListPage() {
       {/* Nav bar */}
       <header className="h-16 bg-white border-b border-[#ebebeb] flex items-center justify-between px-6">
         <span className="font-mono text-xs text-[#888888] uppercase tracking-wide">
-          Case Intelligence
+          Trace-X
         </span>
         <div className="flex items-center gap-3">
           <span className="text-sm text-[#4d4d4d]">
@@ -263,7 +263,7 @@ export default function CaseListPage() {
         className="mx-auto w-full max-w-5xl px-4 py-10"
         style={{ minHeight: 'calc(100vh - 64px)' }}
       >
-        <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Case Intelligence</p>
+        <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Trace-X</p>
         <h1 className="mt-3 text-xl font-semibold leading-7 tracking-[-0.6px] text-[#171717]">
           Investigation cases.
         </h1>
@@ -343,27 +343,39 @@ export default function CaseListPage() {
                 </tr>
               </thead>
               <tbody>
-                {cases.map((item) => (
-                  <tr
-                    key={item.caseId}
-                    onClick={() => navigate(`/cases/${item.caseId}`)}
-                    className="cursor-pointer border-b border-[#ebebeb] transition-colors last:border-b-0 hover:bg-[#fafafa]"
-                    title={`Open workspace for ${item.caseId}`}
-                  >
-                    <td className="whitespace-nowrap px-4 py-3 font-mono text-sm text-[#171717]">
-                      {item.caseId}
-                    </td>
-                    <td className="px-4 py-3">
-                      <StatusBadge status={item.status} />
-                    </td>
-                    <td className="px-4 py-3 text-sm text-[#4d4d4d]">{item.entitiesCount ?? 0}</td>
-                    <td className="px-4 py-3 text-sm text-[#4d4d4d]">{item.edgesCount ?? 0}</td>
-                    <td className="px-4 py-3 text-sm text-[#4d4d4d]">{item.recordCount ?? 0}</td>
-                    <td className="whitespace-nowrap px-4 py-3 text-sm text-[#4d4d4d]">
-                      {formatDateTime(item.updatedAt)}
-                    </td>
-                  </tr>
-                ))}
+                {cases.map((item) => {
+                  const hasPattern = Array.isArray(item.patterns) && item.patterns.length > 0;
+                  const patternTooltip = hasPattern ? item.patterns.map(p => p.description).join('\n') : '';
+                  return (
+                    <tr
+                      key={item.caseId}
+                      onClick={() => navigate(`/cases/${item.caseId}`)}
+                      className="cursor-pointer border-b border-[#ebebeb] transition-colors last:border-b-0 hover:bg-[#fafafa]"
+                      title={`Open workspace for ${item.caseId}`}
+                    >
+                      <td className="whitespace-nowrap px-4 py-3 font-mono text-sm text-[#171717]">
+                        {item.caseId}
+                      </td>
+                      <td className="px-4 py-3 flex items-center gap-2">
+                        <StatusBadge status={item.status} />
+                        {hasPattern && (
+                          <span 
+                            className="inline-flex items-center rounded-full bg-[#fef08a] px-2 py-0.5 font-mono text-xs font-semibold text-[#854d0e] cursor-help"
+                            title={patternTooltip}
+                          >
+                            ⚠️ Priority
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-sm text-[#4d4d4d]">{item.entitiesCount ?? 0}</td>
+                      <td className="px-4 py-3 text-sm text-[#4d4d4d]">{item.edgesCount ?? 0}</td>
+                      <td className="px-4 py-3 text-sm text-[#4d4d4d]">{item.recordCount ?? 0}</td>
+                      <td className="whitespace-nowrap px-4 py-3 text-sm text-[#4d4d4d]">
+                        {formatDateTime(item.updatedAt)}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </section>

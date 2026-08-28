@@ -17,6 +17,9 @@ class FastApiError extends AppError {
  * @param {string} normalizedCase.caseId - Case identifier
  * @param {string[]} normalizedCase.textReports - Array of text reports
  * @param {Array<Record<string, any>>} normalizedCase.csvRecords - Array of parsed CSV objects
+ * @param {Array<{ canonicalId: string, type: string, lastSeenCaseId: string }>} [normalizedCase.caseHistory]
+ *   Previously resolved canonical entities passed for cross-case recurrence detection.
+ *   Gateway fetches this from MongoDB and injects it so the reasoning service stays stateless.
  * @param {Object} [options] - Optional overrides (e.g. for testing)
  * @param {string} [options.baseUrl] - Custom base URL
  * @param {number} [options.timeoutMs] - Custom timeout in milliseconds
@@ -24,7 +27,7 @@ class FastApiError extends AppError {
  */
 const callFastAPI = async (normalizedCase, options = {}) => {
   const baseUrl = options.baseUrl !== undefined ? options.baseUrl : env.FASTAPI_BASE_URL;
-  const timeoutMs = options.timeoutMs || env.FASTAPI_TIMEOUT_MS || 30000;
+  const timeoutMs = options.timeoutMs || env.FASTAPI_TIMEOUT_MS || 60000;
 
   if (!baseUrl || typeof baseUrl !== "string" || !baseUrl.trim()) {
     throw new FastApiError(
@@ -37,11 +40,15 @@ const callFastAPI = async (normalizedCase, options = {}) => {
   // Construct target endpoint
   const endpoint = `${baseUrl.replace(/\/+$/, "")}/case`;
 
-  // Construct exact clean request payload (no secrets, no internal tokens, no unnecessary metadata)
+  // Construct exact clean request payload matching the full CaseRequest Pydantic contract:
+  // { caseId, textReports, csvRecords, caseHistory }
   const requestPayload = {
     caseId: normalizedCase.caseId,
     textReports: Array.isArray(normalizedCase.textReports) ? normalizedCase.textReports : [],
     csvRecords: Array.isArray(normalizedCase.csvRecords) ? normalizedCase.csvRecords : [],
+    // caseHistory: inject previously resolved canonical entities so the reasoning service
+    // can perform cross-case recurrence detection without querying MongoDB directly.
+    caseHistory: Array.isArray(normalizedCase.caseHistory) ? normalizedCase.caseHistory : [],
   };
 
   // Build request headers
