@@ -2,6 +2,7 @@ const express = require("express");
 const caseController = require("../controllers/caseController");
 const authMiddleware = require("../middleware/authMiddleware");
 const { handleUpload } = require("../middleware/uploadMiddleware");
+const { runCrossCaseLinking } = require("../services/crossCaseLinkingService");
 
 const router = express.Router();
 
@@ -14,6 +15,23 @@ const router = express.Router();
  * @access  Private (Requires valid Investigator Bearer JWT)
  */
 router.post("/", authMiddleware, handleUpload, caseController.createCaseIntake);
+
+/**
+ * @route   POST /api/cases/:caseId/relink
+ * @desc    Manually trigger cross-case entity linking for a specific case
+ * @access  Private
+ */
+router.post("/:caseId/relink", authMiddleware, (req, res) => {
+  const { caseId } = req.params;
+  // Fire-and-forget
+  runCrossCaseLinking(caseId).catch((err) => {
+    console.error(`[crossCaseLinking] Manual run failed for ${caseId}:`, err.message);
+  });
+  return res.status(202).json({
+    success: true,
+    message: `Cross-case linking job queued for case ${caseId}`,
+  });
+});
 
 /**
  * @route   GET /api/cases
@@ -52,5 +70,12 @@ router.get("/:caseId/timeline", authMiddleware, caseController.fetchCaseTimeline
  * @access  Private (Requires valid Investigator Bearer JWT)
  */
 router.get("/:caseId/guardrail/:edgeId", authMiddleware, caseController.fetchGuardrailDetail);
+
+/**
+ * @route   PATCH /api/cases/:caseId/status
+ * @desc    Toggle case status
+ * @access  Private
+ */
+router.patch("/:caseId/status", authMiddleware, caseController.updateCaseStatus);
 
 module.exports = router;

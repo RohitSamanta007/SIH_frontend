@@ -11,9 +11,11 @@ const STATUS_BADGE_CLASSES = {
   failed: 'bg-[#f7d4d6] text-[#c50000]',
   pending: 'bg-[#ffefcf] text-[#ab570a]',
   processing: 'bg-[#ffefcf] text-[#ab570a]',
+  open: 'bg-[#d1fae5] text-[#065f46]', // light green
+  closed: 'bg-[#fee2e2] text-[#991b1b]', // light red
 };
 
-const TABLE_COLUMNS = ['CASE ID', 'STATUS', 'ENTITIES', 'EDGES', 'RECORDS', 'UPDATED'];
+const TABLE_COLUMNS = ['CASE NAME', 'CATEGORY', 'PRIORITY', 'STATUS', 'ENTITIES', 'EDGES', 'RECORDS', 'UPDATED'];
 
 function formatDateTime(value) {
   if (!value) return '—';
@@ -39,12 +41,59 @@ function StatusBadge({ status }) {
   );
 }
 
+const PRIORITY_STYLES = {
+  high: {
+    bg: 'bg-[#fee2e2]',
+    text: 'text-[#991b1b]',
+    icon: (
+      <svg className="mr-1 h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+      </svg>
+    )
+  },
+  medium: {
+    bg: 'bg-[#ffefcf]',
+    text: 'text-[#ab570a]',
+    icon: (
+      <svg className="mr-1 h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M18 12H6" />
+      </svg>
+    )
+  },
+  low: {
+    bg: 'bg-[#d1fae5]',
+    text: 'text-[#065f46]',
+    icon: (
+      <svg className="mr-1 h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+      </svg>
+    )
+  }
+};
+
+function PriorityBadge({ priority }) {
+  if (!priority || priority === 'unspecified') return <span className="text-[#4d4d4d]">—</span>;
+  
+  const style = PRIORITY_STYLES[priority.toLowerCase()] || PRIORITY_STYLES.medium;
+  
+  return (
+    <span
+      className={`inline-flex items-center rounded-full px-2 py-0.5 font-mono text-xs uppercase tracking-wide ${style.bg} ${style.text}`}
+    >
+      {style.icon}
+      {priority}
+    </span>
+  );
+}
+
 /**
  * Case intake panel — submits the investigator's real input to POST /api/cases.
  * Sends multipart/form-data via FormData (browser sets the multipart boundary);
  * the shared apiClient attaches the Bearer JWT automatically.
  */
 function CaseIntakeForm({ onCreated }) {
+  const [caseName, setCaseName] = useState('');
+  const [category, setCategory] = useState('');
   const [reportText, setReportText] = useState('');
   const [files, setFiles] = useState([]);
   const [submitting, setSubmitting] = useState(false);
@@ -64,12 +113,20 @@ function CaseIntakeForm({ onCreated }) {
     setRequestError('');
     setCreatedCase(null);
 
+    if (!caseName.trim() || !category.trim()) {
+      setFieldError('Case name and category must be filled.');
+      return;
+    }
+
     if (!reportText.trim() && files.length === 0) {
       setFieldError('Add a text report or select at least one CSV file.');
       return;
     }
 
     const formData = new FormData();
+    formData.append('caseName', caseName.trim());
+    formData.append('category', category.trim());
+
     if (reportText.trim()) {
       formData.append('textReports', reportText.trim());
     }
@@ -91,6 +148,8 @@ function CaseIntakeForm({ onCreated }) {
         throw new Error('Case creation response was missing a caseId.');
       }
       setCreatedCase(result);
+      setCaseName('');
+      setCategory('');
       setReportText('');
       setFiles([]);
       if (fileInputRef.current) {
@@ -128,7 +187,7 @@ function CaseIntakeForm({ onCreated }) {
   return (
     <section className="mt-8 rounded-xl bg-white px-6 py-6" style={{ boxShadow: CARD_SHADOW }}>
       <div className="flex items-center justify-between">
-        <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">New case</p>
+        <h2 className="text-xl font-bold tracking-tight text-[#171717]">New Case</h2>
         <p className="hidden font-mono text-xs text-[#888888] sm:block">POST /api/cases</p>
       </div>
 
@@ -157,6 +216,37 @@ function CaseIntakeForm({ onCreated }) {
               : ''}
           </div>
         )}
+
+        <div className="flex gap-4">
+          <div className="flex-1 flex flex-col gap-1.5">
+            <label htmlFor="case-name" className="text-sm font-medium text-[#171717]">
+              Case name *
+            </label>
+            <input
+              id="case-name"
+              type="text"
+              value={caseName}
+              onChange={(e) => setCaseName(e.target.value)}
+              disabled={submitting}
+              placeholder="E.g. Operation Alpha"
+              className="rounded-md border border-[#ebebeb] bg-white px-3 py-2 text-sm text-[#171717] placeholder:text-[#888888] outline-none focus:border-[#a1a1a1] disabled:opacity-60"
+            />
+          </div>
+          <div className="flex-1 flex flex-col gap-1.5">
+            <label htmlFor="category" className="text-sm font-medium text-[#171717]">
+              Category *
+            </label>
+            <input
+              id="category"
+              type="text"
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              disabled={submitting}
+              placeholder="E.g. Fraud, Terrorism"
+              className="rounded-md border border-[#ebebeb] bg-white px-3 py-2 text-sm text-[#171717] placeholder:text-[#888888] outline-none focus:border-[#a1a1a1] disabled:opacity-60"
+            />
+          </div>
+        </div>
 
         <div className="flex flex-col gap-1.5">
           <label htmlFor="report-text" className="text-sm font-medium text-[#171717]">
@@ -243,9 +333,18 @@ export default function CaseListPage() {
     <div className="min-h-screen bg-[#fafafa]">
       {/* Nav bar */}
       <header className="h-16 bg-white border-b border-[#ebebeb] flex items-center justify-between px-6">
-        <span className="font-mono text-xs text-[#888888] uppercase tracking-wide">
-          Trace-X
-        </span>
+        <div 
+          onClick={() => navigate('/cases')} 
+          className="flex items-center gap-2 cursor-pointer transition-opacity hover:opacity-80"
+          title="Go to dashboard"
+        >
+          <svg className="h-6 w-6 text-[#171717]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+          </svg>
+          <span className="font-sans text-lg font-bold tracking-tight text-[#171717]">
+            Trace-X
+          </span>
+        </div>
         <div className="flex items-center gap-3">
           <span className="text-sm text-[#4d4d4d]">
             {user?.username ? `Signed in as ${user.username}` : ''}
@@ -263,7 +362,6 @@ export default function CaseListPage() {
         className="mx-auto w-full max-w-5xl px-4 py-10"
         style={{ minHeight: 'calc(100vh - 64px)' }}
       >
-        <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Trace-X</p>
         <h1 className="mt-3 text-xl font-semibold leading-7 tracking-[-0.6px] text-[#171717]">
           Investigation cases.
         </h1>
@@ -354,18 +452,16 @@ export default function CaseListPage() {
                       title={`Open workspace for ${item.caseId}`}
                     >
                       <td className="whitespace-nowrap px-4 py-3 font-mono text-sm text-[#171717]">
-                        {item.caseId}
+                        {item.title || item.caseId}
+                      </td>
+                      <td className="whitespace-nowrap px-4 py-3 text-sm text-[#4d4d4d]">
+                        {item.metadata?.category || '—'}
                       </td>
                       <td className="px-4 py-3 flex items-center gap-2">
-                        <StatusBadge status={item.status} />
-                        {hasPattern && (
-                          <span 
-                            className="inline-flex items-center rounded-full bg-[#fef08a] px-2 py-0.5 font-mono text-xs font-semibold text-[#854d0e] cursor-help"
-                            title={patternTooltip}
-                          >
-                            ⚠️ Priority
-                          </span>
-                        )}
+                        <PriorityBadge priority={item.metadata?.priority} />
+                      </td>
+                      <td className="px-4 py-3">
+                        <StatusBadge status={item.status === 'closed' ? 'closed' : 'open'} />
                       </td>
                       <td className="px-4 py-3 text-sm text-[#4d4d4d]">{item.entitiesCount ?? 0}</td>
                       <td className="px-4 py-3 text-sm text-[#4d4d4d]">{item.edgesCount ?? 0}</td>

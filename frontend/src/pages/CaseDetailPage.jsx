@@ -14,8 +14,12 @@ const STATUS_BADGE_CLASSES = {
   pending: 'bg-[#ffefcf] text-[#ab570a]',
   processing: 'bg-[#ffefcf] text-[#ab570a]',
   verified: 'bg-[#d1fae5] text-[#065f46]',
+  approved: 'bg-[#d1fae5] text-[#065f46]',
   rejected: 'bg-[#fee2e2] text-[#991b1b]',
+  flagged: 'bg-[#ffefcf] text-[#ab570a]',
   unspecified: 'bg-[#f3f4f6] text-[#374151]',
+  open: 'bg-[#d1fae5] text-[#065f46]', // light green
+  closed: 'bg-[#fee2e2] text-[#991b1b]', // light red
 };
 
 const GRAPH_LAYOUT_COLUMNS = 4;
@@ -117,7 +121,7 @@ function buildGraphPayload(graphData) {
   return { flowNodes, flowEdges, unmappedNodes, unmappedEdges };
 }
 
-function TimelineEventRow({ event, index, getEntityName }) {
+function TimelineEventRow({ event, index, getEntityName, onClick }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const ts = formatTimelineTimestamp(event?.timestamp);
   const source = typeof event?.source === 'string' ? event.source.trim() : '';
@@ -132,11 +136,7 @@ function TimelineEventRow({ event, index, getEntityName }) {
 
   return (
     <li key={key} className="flex flex-col border-b border-[#ebebeb] last:border-0 bg-white">
-      <button 
-        onClick={() => setIsExpanded(!isExpanded)}
-        className="flex w-full items-start gap-4 px-6 py-4 text-left hover:bg-[#fafafa] transition-colors focus:outline-none focus:bg-[#f5f5f5]"
-        aria-expanded={isExpanded}
-      >
+      <div className="flex w-full items-start gap-4 px-6 py-4 text-left transition-colors">
         <p className="w-44 shrink-0 font-mono text-xs leading-5 text-[#888888] pt-0.5">{ts ?? 'Undated'}</p>
         <div className="min-w-0 flex-1">
           <p className="truncate font-mono text-sm text-[#171717] font-medium" title={`${sourceName} ↔ ${targetName}`}>
@@ -150,45 +150,146 @@ function TimelineEventRow({ event, index, getEntityName }) {
             </p>
           )}
         </div>
-        <div className="shrink-0 text-[#a1a1a1] pt-0.5 ml-2">
-          {isExpanded ? (
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>
-          ) : (
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
-          )}
-        </div>
-      </button>
-
-      {isExpanded && (
-        <div className="bg-[#fafafa] px-6 py-5 sm:pl-[216px] border-t border-[#ebebeb]">
-           <div className="mb-4">
-             <div className="flex items-center gap-3 mb-2">
-               <span className="font-mono text-xs uppercase tracking-wide text-[#888888]">AI Guardrail</span>
-               <StatusBadge status={event.guardrailStatus || 'unspecified'} />
-             </div>
-             <p className="text-sm text-[#4d4d4d] leading-relaxed">
-               {event.guardrailRationale || 'No rationale provided by AI engine.'}
-             </p>
-           </div>
-           
-           {evidenceCount > 0 && (
-             <div>
-               <p className="font-mono text-xs uppercase tracking-wide text-[#888888] mb-3">Evidence Records</p>
-               <div className="space-y-3">
-                 {event.evidence.map((ev, idx) => (
-                   <div key={idx} className="bg-white border border-[#ebebeb] rounded-md p-3">
-                     <p className="font-mono text-xs text-[#0761d1] mb-1.5 font-medium">{ev.matchedField}</p>
-                     <pre className="text-xs text-[#4d4d4d] font-mono whitespace-pre-wrap break-words bg-[#fafafa] p-2 rounded border border-[#f5f5f5]">
-                       {typeof ev.record === 'object' ? JSON.stringify(ev.record, null, 2) : String(ev.record)}
-                     </pre>
-                   </div>
-                 ))}
-               </div>
-             </div>
-           )}
-        </div>
-      )}
+      </div>
     </li>
+  );
+}
+
+
+// Timeline range scrubber — rendered below the graph
+function TimelineScrubber({ bounds, activeRange, onChange }) {
+  const totalMs = bounds.max - bounds.min;
+  const timestamps = bounds.timestamps || [];
+
+  const snapToNearest = (ms) => {
+    if (!timestamps.length) return ms;
+    return timestamps.reduce((prev, curr) => 
+      Math.abs(curr - ms) < Math.abs(prev - ms) ? curr : prev
+    );
+  };
+
+  const startPct = activeRange
+    ? ((new Date(activeRange.start).getTime() - bounds.min) / totalMs) * 100
+    : 0;
+  const endPct = activeRange
+    ? ((new Date(activeRange.end).getTime() - bounds.min) / totalMs) * 100
+    : 100;
+
+  const fmtDate = (ms) =>
+    new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+
+  const handleStartChange = (e) => {
+    const pct = Number(e.target.value);
+    const rawStart = bounds.min + (pct / 100) * totalMs;
+    const snappedStart = snapToNearest(rawStart);
+    const curEnd = activeRange ? new Date(activeRange.end).getTime() : bounds.max;
+    
+    if (snappedStart >= curEnd) return;
+    onChange({ start: new Date(snappedStart).toISOString(), end: new Date(curEnd).toISOString() });
+  };
+
+  const handleEndChange = (e) => {
+    const pct = Number(e.target.value);
+    const rawEnd = bounds.min + (pct / 100) * totalMs;
+    const snappedEnd = snapToNearest(rawEnd);
+    const curStart = activeRange ? new Date(activeRange.start).getTime() : bounds.min;
+    
+    if (snappedEnd <= curStart) return;
+    onChange({ start: new Date(curStart).toISOString(), end: new Date(snappedEnd).toISOString() });
+  };
+
+  const handleReset = () => onChange(null);
+
+  const displayStart = activeRange
+    ? fmtDate(new Date(activeRange.start).getTime())
+    : fmtDate(bounds.min);
+  const displayEnd = activeRange
+    ? fmtDate(new Date(activeRange.end).getTime())
+    : fmtDate(bounds.max);
+
+  return (
+    <div className="px-6 py-4 border-t border-[#ebebeb] bg-[#fafafa]">
+      <div className="flex items-center justify-between mb-2">
+        <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">
+          Timeline Filter
+        </p>
+        {activeRange && (
+          <button
+            onClick={handleReset}
+            className="font-mono text-xs text-[#888888] hover:text-[#171717] transition-colors underline underline-offset-2"
+          >
+            Reset
+          </button>
+        )}
+      </div>
+
+      {/* Date labels */}
+      <div className="flex justify-between mb-1">
+        <span className="font-mono text-xs text-[#0761d1] font-medium">{displayStart}</span>
+        <span className="font-mono text-xs text-[#0761d1] font-medium">{displayEnd}</span>
+      </div>
+
+      {/* Track */}
+      <div className="relative h-6 flex items-center">
+        {/* Background track */}
+        <div className="absolute w-full h-1.5 rounded-full bg-[#ebebeb]" />
+        
+        {/* Tick marks for each timestamp */}
+        {timestamps.map((ts, idx) => {
+          const pct = totalMs === 0 ? 0 : ((ts - bounds.min) / totalMs) * 100;
+          return (
+            <div 
+              key={`tick-${idx}`}
+              className="absolute h-2.5 w-[2px] bg-[#a1a1a1] -translate-x-1/2 pointer-events-none rounded-sm"
+              style={{ left: `${pct}%`, top: '50%', transform: 'translate(-50%, -50%)' }}
+              title={new Date(ts).toLocaleString()}
+            />
+          );
+        })}
+        {/* Active range highlight */}
+        <div
+          className="absolute h-1.5 rounded-full bg-[#0761d1]"
+          style={{ left: `${startPct}%`, width: `${endPct - startPct}%` }}
+        />
+        {/* Start thumb */}
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={0.1}
+          value={startPct}
+          onChange={handleStartChange}
+          className="absolute w-full h-1.5 opacity-0 cursor-pointer z-10"
+          style={{ pointerEvents: 'auto' }}
+          aria-label="Start of time range"
+        />
+        {/* End thumb — layered on top */}
+        <input
+          type="range"
+          min={0}
+          max={100}
+          step={0.1}
+          value={endPct}
+          onChange={handleEndChange}
+          className="absolute w-full h-1.5 opacity-0 cursor-pointer z-20"
+          aria-label="End of time range"
+        />
+        {/* Visible thumb markers */}
+        <div
+          className="absolute w-4 h-4 rounded-full bg-white border-2 border-[#0761d1] shadow-sm -translate-x-1/2 pointer-events-none"
+          style={{ left: `${startPct}%` }}
+        />
+        <div
+          className="absolute w-4 h-4 rounded-full bg-white border-2 border-[#0761d1] shadow-sm -translate-x-1/2 pointer-events-none"
+          style={{ left: `${endPct}%` }}
+        />
+      </div>
+
+      <div className="flex justify-between mt-1">
+        <span className="font-mono text-xs text-[#888888]">{fmtDate(bounds.min)}</span>
+        <span className="font-mono text-xs text-[#888888]">{fmtDate(bounds.max)}</span>
+      </div>
+    </div>
   );
 }
 
@@ -216,6 +317,28 @@ export default function CaseDetailPage() {
   const [guardrailFetchStatus, setGuardrailFetchStatus] = useState('idle');
   const [guardrailData, setGuardrailData] = useState(null);
   const [guardrailError, setGuardrailError] = useState('');
+
+  // Timeline scrubber state
+  const [activeTimeRange, setActiveTimeRange] = useState(null);
+  
+  const [statusUpdating, setStatusUpdating] = useState(false);
+
+  const toggleCaseStatus = async () => {
+    if (!graphData) return;
+    setStatusUpdating(true);
+    const newStatus = graphData.status === 'closed' ? 'open' : 'closed';
+    try {
+      const res = await apiClient.patch(`/cases/${encodeURIComponent(caseId)}/status`, { status: newStatus });
+      if (res.data?.success) {
+        setGraphData(prev => ({ ...prev, status: newStatus }));
+      }
+    } catch (err) {
+      console.error('Failed to update status', err);
+      alert('Failed to update case status.');
+    } finally {
+      setStatusUpdating(false);
+    }
+  };
 
   const fetchGraph = useCallback(async () => {
     setFetchStatus('loading');
@@ -359,34 +482,6 @@ export default function CaseDetailPage() {
     [caseId]
   );
 
-  const handleNodeClick = useCallback(
-    (_event, node) => {
-      const entityId = node?.id;
-      if (!entityId || typeof entityId !== 'string') return;
-      setSelectedEdgeId(null);
-      setGuardrailData(null);
-      setGuardrailError('');
-      setGuardrailFetchStatus('idle');
-      setSelectedEntityId(entityId);
-      fetchEntity(entityId);
-    },
-    [fetchEntity]
-  );
-
-  const handleEdgeClick = useCallback(
-    (_event, edge) => {
-      const edgeId = edge?.id;
-      if (!edgeId || typeof edgeId !== 'string') return;
-      setSelectedEntityId(null);
-      setEntityData(null);
-      setEntityError('');
-      setEntityStatus('idle');
-      setSelectedEdgeId(edgeId);
-      fetchGuardrail(edgeId);
-    },
-    [fetchGuardrail]
-  );
-
   const closeEntityPanel = useCallback(() => {
     setSelectedEntityId(null);
     setEntityData(null);
@@ -400,6 +495,49 @@ export default function CaseDetailPage() {
     setGuardrailError('');
     setGuardrailFetchStatus('idle');
   }, []);
+
+  const handleBackgroundClick = useCallback(() => {
+    closeEntityPanel();
+    closeGuardrailPanel();
+  }, [closeEntityPanel, closeGuardrailPanel]);
+
+  const handleNodeClick = useCallback(
+    (_event, node) => {
+      const entityId = node?.canonicalId || node?.id;
+      if (!entityId || typeof entityId !== 'string') return;
+      
+      // If clicking the already selected node, deselect it
+      if (selectedEntityId === entityId) {
+        closeEntityPanel();
+        return;
+      }
+
+      closeGuardrailPanel();
+      
+      setSelectedEntityId(entityId);
+      fetchEntity(entityId);
+    },
+    [fetchEntity, selectedEntityId, closeEntityPanel, closeGuardrailPanel]
+  );
+
+  const handleEdgeClick = useCallback(
+    (_event, edge) => {
+      const edgeId = edge?.id;
+      if (!edgeId || typeof edgeId !== 'string') return;
+      
+      // If clicking the already selected edge, deselect it
+      if (selectedEdgeId === edgeId) {
+        closeGuardrailPanel();
+        return;
+      }
+
+      closeEntityPanel();
+      
+      setSelectedEdgeId(edgeId);
+      fetchGuardrail(edgeId);
+    },
+    [fetchGuardrail, selectedEdgeId, closeGuardrailPanel, closeEntityPanel]
+  );
 
   useEffect(() => {
     if (caseId) {
@@ -418,13 +556,32 @@ export default function CaseDetailPage() {
   const isEmptyGraph =
     fetchStatus === 'ready' && graph.flowNodes.length === 0 && graph.flowEdges.length === 0;
 
+  // Derive min/max timestamps from edges for the scrubber
+  const edgeTimeBounds = useMemo(() => {
+    const edges = graphData?.edges || [];
+    const timestamps = edges
+      .map(e => e.timestamp ? new Date(e.timestamp).getTime() : null)
+      .filter(t => t !== null && !isNaN(t));
+    if (timestamps.length === 0) return null;
+    return { min: Math.min(...timestamps), max: Math.max(...timestamps), timestamps };
+  }, [graphData]);
+
   return (
     <div className="min-h-screen bg-[#fafafa]">
       {/* Nav bar */}
       <header className="h-16 bg-white border-b border-[#ebebeb] flex items-center justify-between px-6">
-        <span className="font-mono text-xs text-[#888888] uppercase tracking-wide">
-          Trace-X
-        </span>
+        <div 
+          onClick={() => navigate('/cases')} 
+          className="flex items-center gap-2 cursor-pointer transition-opacity hover:opacity-80"
+          title="Go to dashboard"
+        >
+          <svg className="h-6 w-6 text-[#171717]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
+          </svg>
+          <span className="font-sans text-lg font-bold tracking-tight text-[#171717]">
+            Trace-X
+          </span>
+        </div>
         <div className="flex items-center gap-3">
           <span className="text-sm text-[#4d4d4d]">
             {user?.username ? `Signed in as ${user.username}` : ''}
@@ -449,15 +606,32 @@ export default function CaseDetailPage() {
           ← Back to cases
         </button>
 
-        <p className="mt-6 font-mono text-xs uppercase tracking-wide text-[#888888]">
-          Investigation workspace
-        </p>
+        <h2 className="mt-6 text-2xl font-bold tracking-tight text-[#171717]">
+          Investigation Workspace
+        </h2>
         <div className="mt-3 flex flex-wrap items-center gap-3">
           <h1 className="text-xl font-semibold leading-7 tracking-[-0.6px] text-[#171717]">
-            <span className="font-mono">{caseId}</span>
+            {graphData?.title ? graphData.title : <span className="font-mono">{caseId}</span>}
           </h1>
-          {fetchStatus === 'ready' && !isEmptyGraph && graphData?.status && (
-            <StatusBadge status={graphData.status} />
+          {graphData?.title && (
+            <span className="font-mono text-sm text-[#888888]">({caseId})</span>
+          )}
+          {graphData?.metadata?.category && (
+            <span className="inline-flex items-center rounded-full bg-[#f3f4f6] px-2.5 py-0.5 text-xs font-medium text-[#374151]">
+              {graphData.metadata.category}
+            </span>
+          )}
+          {fetchStatus === 'ready' && !isEmptyGraph && (
+            <StatusBadge status={graphData?.status === 'closed' ? 'closed' : 'open'} />
+          )}
+          {fetchStatus === 'ready' && !isEmptyGraph && (
+            <button
+              onClick={toggleCaseStatus}
+              disabled={statusUpdating}
+              className="ml-auto h-8 rounded-md bg-[#171717] px-3 text-sm font-medium text-white transition-colors hover:bg-black disabled:opacity-60"
+            >
+              {graphData?.status === 'closed' ? 'Reopen case' : 'Close case'}
+            </button>
           )}
         </div>
         <p className="mt-1 text-sm leading-5 tracking-[-0.28px] text-[#4d4d4d]">
@@ -541,6 +715,45 @@ export default function CaseDetailPage() {
                 graph: {graph.unmappedEdges.join('; ')}
               </div>
             )}
+            
+            {Array.isArray(graphData?.patterns) && graphData.patterns.length > 0 && (
+              <section className="mt-8 overflow-hidden rounded-xl bg-white" style={{ boxShadow: CARD_SHADOW }}>
+                <div className="border-b border-[#ebebeb] px-6 py-3">
+                  <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Investigative Patterns</p>
+                </div>
+                <div className="divide-y divide-[#ebebeb]">
+                  {graphData.patterns.map((pattern, idx) => (
+                    <div key={idx} className="p-6">
+                      <div className="flex items-center gap-3">
+                        <span className="inline-flex items-center rounded-full bg-[#f3f4f6] px-2.5 py-0.5 font-mono text-xs font-medium text-[#374151]">
+                          {pattern.patternType}
+                        </span>
+                        {typeof pattern.confidence === 'number' && (
+                          <span className="font-mono text-xs text-[#888888]">
+                            Confidence: {pattern.confidence}
+                          </span>
+                        )}
+                      </div>
+                      {typeof pattern.description === 'string' && pattern.description.trim() && (
+                        <p className="mt-3 text-sm leading-5 text-[#171717]">
+                          {pattern.description}
+                        </p>
+                      )}
+                      {(Array.isArray(pattern.relatedEntityIds) && pattern.relatedEntityIds.length > 0) && (
+                        <div className="mt-3">
+                          <p className="font-mono text-xs text-[#888888]">Related Entities:</p>
+                          <ul className="mt-1 flex flex-wrap gap-2">
+                            {pattern.relatedEntityIds.map(eid => (
+                              <li key={eid} className="font-mono text-xs text-[#4d4d4d]">{eid}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
 
             <section
               className="mt-8 overflow-hidden rounded-xl bg-white"
@@ -559,10 +772,19 @@ export default function CaseDetailPage() {
                   graphData={{ nodes: graphData?.nodes || [], edges: graphData?.edges || [] }}
                   onNodeClick={(id) => handleNodeClick(null, { id })}
                   onEdgeClick={(id) => handleEdgeClick(null, { id })}
-                  activeTimeRange={null}
+                  onBackgroundClick={handleBackgroundClick}
+                  activeTimeRange={activeTimeRange}
                   currentCaseId={caseId}
+                  selectedEdgeId={selectedEdgeId}
                 />
               </div>
+              {edgeTimeBounds && (
+                <TimelineScrubber
+                  bounds={edgeTimeBounds}
+                  activeRange={activeTimeRange}
+                  onChange={setActiveTimeRange}
+                />
+              )}
             </section>
           </>
         )}
@@ -635,7 +857,17 @@ export default function CaseDetailPage() {
             {timelineStatus === 'ready' && (
               <ol className="divide-y divide-[#ebebeb] bg-[#fafafa]">
                 {timelineEvents.map((event, index) => (
-                  <TimelineEventRow key={event.id || index} event={event} index={index} getEntityName={getEntityName} />
+                  <TimelineEventRow 
+                    key={event.id || index} 
+                    event={event} 
+                    index={index} 
+                    getEntityName={getEntityName} 
+                    onClick={() => {
+                      if (event.id || event.edgeId) {
+                        handleEdgeClick(null, { id: event.id || event.edgeId });
+                      }
+                    }}
+                  />
                 ))}
               </ol>
             )}
@@ -932,7 +1164,18 @@ export default function CaseDetailPage() {
                   {typeof guardrailData.edge.edgeType === 'string' && guardrailData.edge.edgeType.trim() && (
                     <div>
                       <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Edge type</p>
-                      <p className="mt-1 text-sm text-[#171717]">{guardrailData.edge.edgeType}</p>
+                      <p className="mt-1 text-sm text-[#171717]">
+                        {
+                          {
+                            shared_phone: 'Shared Phone',
+                            shared_address: 'Shared Address',
+                            telecom_link: 'Telecom Link',
+                            'co-mention': 'Co-Mention',
+                            owns: 'Ownership',
+                            associated_with: 'Associated With'
+                          }[guardrailData.edge.edgeType] || guardrailData.edge.edgeType
+                        }
+                      </p>
                     </div>
                   )}
                   {typeof guardrailData.edge.confidence === 'number' && (
@@ -951,8 +1194,22 @@ export default function CaseDetailPage() {
                   )}
                   {typeof guardrailData.edge.guardrailStatus === 'string' && guardrailData.edge.guardrailStatus.trim() && (
                     <div>
-                      <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Guardrail status</p>
-                      <p className="mt-1 font-mono text-sm text-[#171717]">{guardrailData.edge.guardrailStatus}</p>
+                      <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Status</p>
+                      <div className="mt-1">
+                        {guardrailData.edge.guardrailStatus === 'verified' ? (
+                          <span className="inline-flex items-center rounded-full bg-[#d1fae5] px-2.5 py-0.5 font-mono text-xs font-medium text-[#065f46]">
+                            Verified Fact
+                          </span>
+                        ) : guardrailData.edge.guardrailStatus === 'possible_connection' ? (
+                          <span className="inline-flex items-center rounded-full bg-[#ffefcf] px-2.5 py-0.5 font-mono text-xs font-medium text-[#ab570a]">
+                            Unconfirmed Lead
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center rounded-full bg-[#f3f4f6] px-2.5 py-0.5 font-mono text-xs font-medium text-[#374151]">
+                            {guardrailData.edge.guardrailStatus}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   )}
                   {typeof guardrailData.edge.guardrailRationale === 'string' && guardrailData.edge.guardrailRationale.trim() && (
@@ -979,17 +1236,11 @@ export default function CaseDetailPage() {
                       <ol className="mt-3 space-y-3">
                         {guardrailData.edge.evidence.map((item, idx) => (
                           <li key={idx} className="rounded-md border border-[#ebebeb] bg-[#fafafa] px-3 py-3">
-                            {typeof item?.sourceType === 'string' && item.sourceType.trim() && (
-                              <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">{item.sourceType}</p>
+                            {typeof item?.sourceReportId === 'string' && item.sourceReportId.trim() && (
+                              <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Source: {item.sourceReportId}</p>
                             )}
-                            {typeof item?.field === 'string' && item.field.trim() && (
-                              <p className="mt-1 font-mono text-xs text-[#171717]">Field: {item.field}</p>
-                            )}
-                            {item?.value !== undefined && item?.value !== null && String(item.value).trim() && (
-                              <p className="mt-1 break-all font-mono text-xs text-[#4d4d4d]">Value: {String(item.value)}</p>
-                            )}
-                            {typeof item?.citation === 'string' && item.citation.trim() && (
-                              <p className="mt-1 font-mono text-xs text-[#4d4d4d]">Citation: {item.citation}</p>
+                            {typeof item?.matchedField === 'string' && item.matchedField.trim() && (
+                              <p className="mt-1 font-mono text-xs text-[#171717]">Field: {item.matchedField}</p>
                             )}
                             {item?.record !== undefined && item?.record !== null && (
                               <pre className="mt-2 max-h-32 overflow-auto rounded border border-[#ebebeb] bg-white px-2 py-2 font-mono text-xs leading-5 text-[#4d4d4d]">

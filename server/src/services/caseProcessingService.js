@@ -1,6 +1,7 @@
 const { callFastAPI, FastApiError } = require("./fastApiClient");
 const { persistCaseResults, PersistenceError } = require("./resultPersistenceService");
 const { Entity, Case } = require("../models");
+const { runCrossCaseLinking } = require("./crossCaseLinkingService");
 
 /**
  * Builds a caseHistory payload from all previously resolved canonical entities stored in MongoDB.
@@ -23,7 +24,7 @@ const buildCaseHistory = async (currentCaseId) => {
     const historicEntities = await Entity.aggregate([
       // Exclude any entity that belongs to the current new case, and enforce 90-day rolling window
       { $match: { 
-          caseId: { $ne: currentCaseId },
+          associatedCases: { $nin: [currentCaseId] },
           createdAt: { $gte: ninetyDaysAgo } 
         } 
       },
@@ -34,7 +35,7 @@ const buildCaseHistory = async (currentCaseId) => {
         $group: {
           _id: "$canonicalId",
           type: { $first: "$type" },
-          lastSeenCaseId: { $first: "$caseId" },
+          lastSeenCaseId: { $first: { $arrayElemAt: ["$associatedCases", 0] } },
         },
       },
       // Cap to a reasonable limit to avoid oversized payloads on large deployments
@@ -88,9 +89,12 @@ const processCaseThroughFastApi = async (normalizedCase, options = {}) => {
   //    so the dashboard can show an in-flight indicator while the LLM pipeline runs.
   //    Uses upsert in case of a duplicate submission race.
   try {
+    const newMetadata = {};
+    if (normalizedCase.category) newMetadata.category = normalizedCase.category;
+    
     await Case.findOneAndUpdate(
       { caseId },
-      { $setOnInsert: { caseId, status: "processing", metadata: {} } },
+      { $setOnInsert: { caseId, status: "processing", title: normalizedCase.title, metadata: newMetadata } },
       { upsert: true, new: false }
     );
   } catch (err) {
@@ -134,6 +138,11 @@ const processCaseThroughFastApi = async (normalizedCase, options = {}) => {
 
   // 4. Persist AI reasoning results into MongoDB (Module 4 Store / T06)
   const persistenceResult = await persistCaseResults(fastApiResult, normalizedCase);
+
+  // 5. Trigger cross-case background linking job (fire-and-forget)
+  runCrossCaseLinking(caseId).catch(err => {
+    console.error('[caseProcessingService] Background cross-case linking failed:', err.message);
+  });
 
   return persistenceResult;
 };

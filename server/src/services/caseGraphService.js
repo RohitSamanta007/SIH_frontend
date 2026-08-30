@@ -21,11 +21,11 @@ const getCaseGraph = async (caseId) => {
     throw new NotFoundError(`Case '${normalizedCaseId}' not found`, "CASE_NOT_FOUND");
   }
 
-  // Fetch ALL entities to render the Master Graph context
-  const entities = await Entity.find({}).lean();
+  // Fetch entities associated only with this case
+  const entities = await Entity.find({ associatedCases: normalizedCaseId }).lean();
 
-  // Fetch ALL edges to render the Master Graph context
-  const edges = await Edge.find({}).lean();
+  // Fetch edges associated only with this case
+  const edges = await Edge.find({ associatedCases: normalizedCaseId }).lean();
 
   const nodes = entities.map((entity) => ({
     canonicalId: entity.canonicalId,
@@ -55,6 +55,8 @@ const getCaseGraph = async (caseId) => {
   return {
     caseId: normalizedCaseId,
     status: caseDoc.status,
+    title: caseDoc.title || null,
+    metadata: caseDoc.metadata || {},
     nodes,
     edges: mappedEdges,
   };
@@ -261,7 +263,7 @@ const getGuardrailDetail = async (caseId, edgeId) => {
 const getCasesList = async () => {
   const caseDocs = await Case.find(
     {},
-    { caseId: 1, status: 1, title: 1, sourceUploads: 1, createdAt: 1, updatedAt: 1 }
+    { caseId: 1, status: 1, title: 1, metadata: 1, sourceUploads: 1, createdAt: 1, updatedAt: 1 }
   )
     .sort({ updatedAt: -1 })
     .lean();
@@ -325,6 +327,7 @@ const getCasesList = async () => {
       caseId: caseDoc.caseId,
       status: caseDoc.status || "pending",
       title: caseDoc.title || null,
+      metadata: caseDoc.metadata || {},
       recordCount,
       uploadsCount: uploads.length,
       lastUploadAt,

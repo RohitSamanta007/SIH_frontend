@@ -141,13 +141,18 @@ const persistCaseResults = async (fastApiResult, intakeMetadata = {}) => {
     };
 
     if (!caseDoc) {
+      const newMetadata = {};
+      if (intakeMetadata.category) newMetadata.category = intakeMetadata.category;
+      if (fastApiResult.priority) newMetadata.priority = fastApiResult.priority;
+      
       const createdCases = await Case.create(
         [
           {
             caseId,
             status: "completed",
+            title: intakeMetadata.title,
             sourceUploads: [newUploadRecord],
-            metadata: {},
+            metadata: newMetadata,
           },
         ],
         sessionOption
@@ -156,6 +161,11 @@ const persistCaseResults = async (fastApiResult, intakeMetadata = {}) => {
     } else {
       caseDoc.status = "completed";
       caseDoc.sourceUploads.push(newUploadRecord);
+      if (fastApiResult.priority) {
+        if (!caseDoc.metadata) caseDoc.metadata = {};
+        caseDoc.metadata.priority = fastApiResult.priority;
+        caseDoc.markModified("metadata");
+      }
       await caseDoc.save(sessionOption);
     }
 

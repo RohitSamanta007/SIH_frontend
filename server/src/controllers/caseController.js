@@ -38,6 +38,8 @@ const createCaseIntake = async (req, res, next) => {
       textInput,
       csvBuffer,
       csvString,
+      title: body.caseName,
+      category: body.category,
     });
 
     // 4. Orchestrate call to FastAPI reasoning service & persist into MongoDB (Modules 2 & 4)
@@ -159,6 +161,42 @@ const listCases = async (req, res, next) => {
   }
 };
 
+/**
+ * Update case status
+ *
+ * @route PATCH /api/cases/:caseId/status
+ * @access Private
+ */
+const updateCaseStatus = async (req, res, next) => {
+  try {
+    const { caseId } = req.params;
+    const { status } = req.body;
+    
+    if (!status || !['open', 'closed'].includes(status)) {
+      return res.status(400).json({ success: false, error: { message: 'Invalid status' } });
+    }
+
+    const { Case } = require('../models');
+    const caseDoc = await Case.findOneAndUpdate(
+      { caseId: caseId.trim() },
+      { status },
+      { new: true }
+    );
+
+    if (!caseDoc) {
+      return res.status(404).json({ success: false, error: { message: 'Case not found' } });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: { caseId: caseDoc.caseId, status: caseDoc.status },
+      error: null,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createCaseIntake,
   listCases,
@@ -166,4 +204,5 @@ module.exports = {
   fetchEntityDetail,
   fetchCaseTimeline,
   fetchGuardrailDetail,
+  updateCaseStatus,
 };

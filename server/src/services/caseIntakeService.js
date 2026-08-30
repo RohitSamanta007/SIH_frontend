@@ -113,9 +113,11 @@ const parseCsvRecords = (csvData) => {
  * @param {string|string[]} [params.textInput] - Text reports
  * @param {Buffer} [params.csvBuffer] - Uploaded CSV buffer
  * @param {string} [params.csvString] - Uploaded or body CSV string
- * @returns {{ caseId: string, textReports: string[], csvRecords: Array<Record<string, any>> }}
+ * @param {string} [params.title] - Case Name
+ * @param {string} [params.category] - Category
+ * @returns {{ caseId: string, textReports: string[], csvRecords: Array<Record<string, any>>, title?: string, category?: string }}
  */
-const processCaseIntake = ({ textInput, csvBuffer, csvString }) => {
+const processCaseIntake = ({ textInput, csvBuffer, csvString, title, category }) => {
   // 1. Normalize text reports
   const textReports = normalizeTextReports(textInput);
 
@@ -135,6 +137,8 @@ const processCaseIntake = ({ textInput, csvBuffer, csvString }) => {
     caseId,
     textReports,
     csvRecords,
+    title,
+    category,
   };
 };
 

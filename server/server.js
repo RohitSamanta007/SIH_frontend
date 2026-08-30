@@ -8,6 +8,7 @@ const caseRoutes = require("./src/routes/case.routes");
 const { seedDefaultInvestigator } = require("./src/services/authService");
 const notFoundHandler = require("./src/middleware/notFoundHandler");
 const errorHandler = require("./src/middleware/errorHandler");
+const { startCrossCaseCron, stopCrossCaseCron } = require("./src/utils/cronJobs");
 
 const app = express();
 
@@ -61,6 +62,9 @@ const startServer = async () => {
     // 1. Connect to MongoDB
     await connectDB();
 
+    // Start background cron jobs
+    startCrossCaseCron();
+
     // 2. Initialize default investigator credentials if none exist
     await seedDefaultInvestigator();
 
@@ -75,6 +79,7 @@ const startServer = async () => {
     // Graceful shutdown handling
     const shutdown = async (signal) => {
       console.log(`\n[Server] ${signal} signal received. Initiating graceful shutdown...`);
+      stopCrossCaseCron();
       server.close(async () => {
         console.log("[Server] HTTP server closed.");
         await disconnectDB();
