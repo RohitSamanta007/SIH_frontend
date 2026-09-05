@@ -1,0 +1,20 @@
+Case 1 — FIR, PS Salt Lake, Sector V (12/01/2026)
+Complaint filed by Mr. Debashish Roy regarding theft of his motorcycle (Reg. No. WB-06-
+AX-4471) parked outside his residence on the night of 10/01/2026. Investigation identified 
+a suspect known locally as "Prem K.", approx age 27, frequently seen near the Sector V 
+market area. Suspect's contact number obtained from a witness: 9876543210. Vehicle 
+recovered partially dismantled from a scrapyard in Howrah.
+
+Case 2 — FIR, PS Howrah (25/01/2026)
+Complaint against an organised vehicle-fencing racket operating out of a scrapyard on 
+Ganguly Lane. Accused named in witness statements as "P. Kumar", address recorded as 14 
+Ganguly Lane, Howrah. Accused's mobile number, provided by an informant, is 
+9876543210 (same as Case 1). Multiple stolen two-wheelers recovered, believed linked to 
+thefts across North Kolkata.
+
+Case 3 — CDR Record (structured, 05/01/2026–20/01/2026)
+Call Detail Record for number 9876543210: 14 outgoing calls to 9800112233 (registered 
+to Anil Ghosh, pawnshop owner, Salt Lake), average call duration 45 seconds
+
+case 4 - FIR, PS Salt Lake (28/01/2026):
+Acting on the CDR analysis linking the primary suspect "P. Kumar" (9876543210) to a local business, a raid was conducted at the pawnshop owned by Mr. Anil Ghosh in Salt Lake, resulting in his arrest and the recovery of multiple stolen motorcycle parts, including engine components matching the vehicle from Case 1, alongside illicit financial ledgers confirming Ghosh's role as the primary buyer and financier for the Howrah-based vehicle-dismantling racket.

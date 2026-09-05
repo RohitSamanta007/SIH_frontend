@@ -78,6 +78,17 @@ class MockFastApiServer {
           const caseId = parsedBody?.caseId || "CASE-MOCK-001";
           const responsePayload = {
             caseId,
+            retrievalSummary: "Mock case summary representing the AI-generated synopsis.",
+            similarCaseLeads: [
+              {
+                matchedCaseId: "CASE-MOCK-HISTORICAL",
+                similarityScore: 0.95,
+                status: "possible_connection",
+                rationale: "Similar modus operandi and overlapping entity types.",
+                reviewRequired: true,
+                reviewMessage: "Investigator verification required."
+              }
+            ],
             entities: [
               {
                 canonicalId: "PERSON-001",
@@ -96,16 +107,23 @@ class MockFastApiServer {
             ],
             relationships: [
               {
+                edgeId: "EDGE-001",
                 source: "PERSON-001",
                 target: "BANK_ACCOUNT-001",
                 edgeType: "TRANSACTION_SENT",
                 confidence: 0.9,
                 timestamp: "2026-08-15T12:00:00Z",
+                eventDate: "2026-08-15",
+                eventTime: "12:00:00",
+                eventType: "financial_transfer",
+                relationReason: "Fund transfer from suspect account",
+                evidenceIds: ["ev-1"],
+                dateConfidence: "explicit",
                 evidence: [
                   {
-                    sourceType: "transaction_csv",
+                    sourceReportId: "doc-1",
+                    matchedField: "txn_history",
                     record: { txn_id: "TXN-99881", amount: 50000 },
-                    citation: "Bank statement record line 1",
                   },
                 ],
               },
@@ -121,6 +139,7 @@ class MockFastApiServer {
             ],
             guardrail: [
               {
+                edgeId: "EDGE-001",
                 status: "approved",
                 rationale: "Evidence directly verified by CDR records",
               },

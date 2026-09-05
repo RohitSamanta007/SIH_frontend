@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { useNavigate, Link } from 'react-router-dom';
 import apiClient from '../api/apiClient.js';
 import { useAuth } from '../state/authContext.jsx';
 
@@ -302,6 +302,12 @@ export default function CaseListPage() {
   const [fetchStatus, setFetchStatus] = useState('loading');
   const [cases, setCases] = useState([]);
   const [errorMessage, setErrorMessage] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const normalizedSearch = searchQuery.trim().toLowerCase();
+  const visibleCases = normalizedSearch
+    ? cases.filter((item) => [item.caseId, item.title, item.metadata?.category, item.retrievalSummary]
+        .filter(Boolean).some((value) => String(value).toLowerCase().includes(normalizedSearch)))
+    : cases;
 
   const fetchCases = useCallback(async () => {
     setFetchStatus('loading');
@@ -333,18 +339,14 @@ export default function CaseListPage() {
     <div className="min-h-screen bg-[#fafafa]">
       {/* Nav bar */}
       <header className="h-16 bg-white border-b border-[#ebebeb] flex items-center justify-between px-6">
-        <div 
-          onClick={() => navigate('/cases')} 
-          className="flex items-center gap-2 cursor-pointer transition-opacity hover:opacity-80"
-          title="Go to dashboard"
-        >
+        <Link to="/cases" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
           <svg className="h-6 w-6 text-[#171717]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
           </svg>
           <span className="font-sans text-lg font-bold tracking-tight text-[#171717]">
             Trace-X
           </span>
-        </div>
+        </Link>
         <div className="flex items-center gap-3">
           <span className="text-sm text-[#4d4d4d]">
             {user?.username ? `Signed in as ${user.username}` : ''}
@@ -362,6 +364,7 @@ export default function CaseListPage() {
         className="mx-auto w-full max-w-5xl px-4 py-10"
         style={{ minHeight: 'calc(100vh - 64px)' }}
       >
+        {/* <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Trace-X</p> */}
         <h1 className="mt-3 text-xl font-semibold leading-7 tracking-[-0.6px] text-[#171717]">
           Investigation cases.
         </h1>
@@ -370,6 +373,20 @@ export default function CaseListPage() {
         </p>
 
         <CaseIntakeForm onCreated={fetchCases} />
+
+        {fetchStatus === 'ready' && (
+          <div className="mt-8">
+            <label htmlFor="case-discovery-search" className="font-mono text-xs uppercase tracking-wide text-[#888888]">Case discovery</label>
+            <input
+              id="case-discovery-search"
+              type="search"
+              value={searchQuery}
+              onChange={(event) => setSearchQuery(event.target.value)}
+              placeholder="Search case ID, name, category, or retrieval summary"
+              className="mt-2 h-10 w-full rounded-md border border-[#ebebeb] bg-white px-3 text-sm text-[#171717] outline-none focus:border-[#171717]"
+            />
+          </div>
+        )}
 
         {fetchStatus === 'loading' && (
           <section
@@ -441,18 +458,17 @@ export default function CaseListPage() {
                 </tr>
               </thead>
               <tbody>
-                {cases.map((item) => {
-                  const hasPattern = Array.isArray(item.patterns) && item.patterns.length > 0;
-                  const patternTooltip = hasPattern ? item.patterns.map(p => p.description).join('\n') : '';
+                {visibleCases.map((item) => {
                   return (
                     <tr
                       key={item.caseId}
-                      onClick={() => navigate(`/cases/${item.caseId}`)}
+                      onClick={() => navigate(`/cases/${encodeURIComponent(item.caseId)}`)}
                       className="cursor-pointer border-b border-[#ebebeb] transition-colors last:border-b-0 hover:bg-[#fafafa]"
                       title={`Open workspace for ${item.caseId}`}
                     >
                       <td className="whitespace-nowrap px-4 py-3 font-mono text-sm text-[#171717]">
-                        {item.title || item.caseId}
+                        <span className="block">{item.title || item.caseId}</span>
+                        {item.retrievalSummary && <span className="mt-1 block max-w-xs truncate font-sans text-xs text-[#888888]">{item.retrievalSummary}</span>}
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 text-sm text-[#4d4d4d]">
                         {item.metadata?.category || '—'}
@@ -472,6 +488,9 @@ export default function CaseListPage() {
                     </tr>
                   );
                 })}
+                {visibleCases.length === 0 && (
+                  <tr><td colSpan={TABLE_COLUMNS.length} className="px-4 py-8 text-center text-sm text-[#4d4d4d]">No cases match this discovery search.</td></tr>
+                )}
               </tbody>
             </table>
           </section>

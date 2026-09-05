@@ -1,6 +1,7 @@
 const express = require("express");
 const caseController = require("../controllers/caseController");
 const authMiddleware = require("../middleware/authMiddleware");
+const { requireInvestigator } = require("../middleware/authMiddleware");
 const { handleUpload } = require("../middleware/uploadMiddleware");
 const { runCrossCaseLinking } = require("../services/crossCaseLinkingService");
 
@@ -77,5 +78,32 @@ router.get("/:caseId/guardrail/:edgeId", authMiddleware, caseController.fetchGua
  * @access  Private
  */
 router.patch("/:caseId/status", authMiddleware, caseController.updateCaseStatus);
+
+/**
+ * @route   POST /api/cases/:caseId/relationships
+ * @desc    Create an investigator-discovered relationship between two entities
+ *          already visible in this case graph. Does not invoke FastAPI.
+ * @access  Private (investigator only)
+ */
+router.post("/:caseId/relationships", authMiddleware, requireInvestigator, caseController.createManualRelationship);
+
+/**
+ * @route   PATCH /api/cases/:caseId/relationships/:edgeId/status
+ * @desc    Update the investigator review status for a specific relationship edge.
+ *          Stores the new reviewStatus and appends an audit entry.
+ *          NEVER overwrites systemStatus (the immutable AI guardrail result).
+ * @access  Private (Requires valid Investigator Bearer JWT)
+ * @body    { status: "verified"|"possible_connection"|"unverified"|"cross_connection"|"unknown", reason?: string }
+ */
+router.patch("/:caseId/relationships/:edgeId/status", authMiddleware, requireInvestigator, caseController.updateRelationshipStatus);
+
+/**
+ * @route   PATCH /api/cases/:caseId/similar-leads/:matchedCaseId/status
+ * @desc    Update the investigator review status for a semantic similar case lead.
+ * @access  Private (Requires valid Investigator Bearer JWT)
+ * @body    { status: "verified"|"possible_connection"|"cross_connection"|"unverified"|"unknown", reason?: string }
+ */
+router.patch("/:caseId/similar-leads/:matchedCaseId/status", authMiddleware, requireInvestigator, caseController.updateSemanticLeadStatus);
+router.post("/:caseId/similar-leads/:matchedCaseId/reviewed", authMiddleware, requireInvestigator, caseController.markSemanticLeadReviewed);
 
 module.exports = router;

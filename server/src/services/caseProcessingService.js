@@ -1,82 +1,30 @@
+"use strict";
+
 const { callFastAPI, FastApiError } = require("./fastApiClient");
 const { persistCaseResults, PersistenceError } = require("./resultPersistenceService");
-const { Entity, Case } = require("../models");
+const { Case } = require("../models");
 const { runCrossCaseLinking } = require("./crossCaseLinkingService");
-
-/**
- * Builds a caseHistory payload from all previously resolved canonical entities stored in MongoDB.
- *
- * The reasoning service (FastAPI) is deliberately stateless — it never queries MongoDB.
- * The gateway is responsible for injecting historical entity context per-request so the
- * reasoning core can perform cross-case recurrence detection (Pattern Rule 1).
- *
- * Shape returned matches the CaseHistoryItem Pydantic model exactly:
- *   { canonicalId: string, type: string, lastSeenCaseId: string }
- *
- * @param {string} currentCaseId - Exclude entities belonging to the current (new) case
- * @returns {Promise<Array<{ canonicalId: string, type: string, lastSeenCaseId: string }>>}
- */
-const buildCaseHistory = async (currentCaseId) => {
-  try {
-    // Fetch one representative entity document per (canonicalId, type) pair from previous cases.
-    const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
-    
-    const historicEntities = await Entity.aggregate([
-      // Exclude any entity that belongs to the current new case, and enforce 90-day rolling window
-      { $match: { 
-          associatedCases: { $nin: [currentCaseId] },
-          createdAt: { $gte: ninetyDaysAgo } 
-        } 
-      },
-      // Sort so the most recently created document wins in the $first accumulator below
-      { $sort: { createdAt: -1 } },
-      // Deduplicate by canonicalId — one CaseHistoryItem per unique canonical entity
-      {
-        $group: {
-          _id: "$canonicalId",
-          type: { $first: "$type" },
-          lastSeenCaseId: { $first: { $arrayElemAt: ["$associatedCases", 0] } },
-        },
-      },
-      // Cap to a reasonable limit to avoid oversized payloads on large deployments
-      { $limit: 500 },
-    ]);
-
-    // FastAPI CaseHistoryItem.type is a strict Literal enum (lowercase only).
-    // MongoDB may hold legacy data with UPPERCASE types or non-enum values (e.g. BANK_ACCOUNT).
-    // Normalize to lowercase and filter out any types that aren't in the allowed set.
-    const ALLOWED_TYPES = new Set(["person", "phone", "location", "vehicle", "org"]);
-
-    return historicEntities
-      .map((doc) => ({
-        canonicalId: doc._id,
-        type: typeof doc.type === "string" ? doc.type.toLowerCase() : "",
-        lastSeenCaseId: doc.lastSeenCaseId,
-      }))
-      .filter((item) => ALLOWED_TYPES.has(item.type));
-  } catch (err) {
-    // Non-fatal: if history fetch fails, the reasoning service degrades gracefully
-    // (caseHistory defaults to [] — cross-case patterns simply won't fire for this run)
-    console.error("[caseProcessingService] Failed to build caseHistory — proceeding with empty history:", err.message);
-    return [];
-  }
-};
+const { extractIdentifiersFromCase } = require("./identifierNormalizationService");
+const { buildExactCaseHistory, buildRetrievalContext } = require("./historicalContextService");
 
 /**
  * Case Processing Service (Orchestration Layer)
- * Coordinates normalized case intake with FastAPI AI reasoning, followed by MongoDB persistence.
+ *
+ * Coordinates normalized case intake → historical context injection →
+ * FastAPI reasoning call → MongoDB persistence.
  *
  * Pipeline:
- *   1. Build caseHistory from MongoDB (existing canonical entities from past cases)
- *   2. Call FastAPI reasoning service with full CaseRequest payload
- *   3. Persist AI results (entities, edges, patterns, guardrail) into MongoDB
+ *  1. Create/upsert Case document with status "processing"
+ *  2. Extract normalized identifiers from current FIR + CSV
+ *  3. Build caseHistory from EXACT identifier matches in previous cases
+ *  4. Build retrievalContext from up to 3 best MongoDB matches
+ *  5. Call FastAPI reasoning service with complete enriched payload
+ *  6. Persist AI results into MongoDB (entities, edges, patterns, guardrail)
+ *  7. Trigger cross-case background linking (fire-and-forget)
  *
- * @param {Object} normalizedCase - Case intake payload from Module 1
- * @param {string} normalizedCase.caseId - Case ID
- * @param {string[]} normalizedCase.textReports - Array of text reports
- * @param {Array<Record<string, any>>} normalizedCase.csvRecords - Parsed CSV records
- * @param {Object} [options] - Optional transport overrides (timeout, baseUrl) — used in tests
- * @returns {Promise<Object>} Persistence summary and Case status
+ * @param {Object} normalizedCase — from caseIntakeService.processCaseIntake()
+ * @param {Object} [options]      — transport overrides used in tests
+ * @returns {Promise<Object>}      Persistence summary and Case status
  */
 const processCaseThroughFastApi = async (normalizedCase, options = {}) => {
   if (!normalizedCase || !normalizedCase.caseId) {
@@ -85,39 +33,108 @@ const processCaseThroughFastApi = async (normalizedCase, options = {}) => {
 
   const caseId = normalizedCase.caseId;
 
-  // 1. Create the Case document in MongoDB immediately with status 'processing'
-  //    so the dashboard can show an in-flight indicator while the LLM pipeline runs.
-  //    Uses upsert in case of a duplicate submission race.
+  // ── 1. Create the Case document immediately so the dashboard can show "processing" ──
   try {
     const newMetadata = {};
     if (normalizedCase.category) newMetadata.category = normalizedCase.category;
-    
+
     await Case.findOneAndUpdate(
       { caseId },
-      { $setOnInsert: { caseId, status: "processing", title: normalizedCase.title, metadata: newMetadata } },
+      {
+        $setOnInsert: {
+          caseId,
+          status: "processing",
+          title: normalizedCase.title,
+          metadata: newMetadata,
+        },
+      },
       { upsert: true, new: false }
     );
   } catch (err) {
-    // Non-fatal: persistence will create the document again during the write phase
     console.warn("[caseProcessingService] Could not pre-create Case document:", err.message);
   }
 
-  // 2. Fetch cross-case entity history from MongoDB and inject into the payload.
-  //    This is the bridge that keeps reasoning-service stateless while enabling
-  //    Pattern Rule 1 (cross_case_recurrence).
-  const caseHistory = await buildCaseHistory(caseId);
+  // ── 2. Extract normalized identifiers from the current FIR and CSV data ──
+  //    This is used to build the exact-match caseHistory and retrievalContext.
+  let normalizedIdentifiers = { phones: [], vehicles: [], emails: [], accounts: [], addresses: [] };
+  try {
+    normalizedIdentifiers = extractIdentifiersFromCase(
+      normalizedCase.textReports || [],
+      normalizedCase.csvRecords  || []
+    );
+    console.log(
+      `[caseProcessingService] Extracted identifiers for ${caseId}:`,
+      `phones=${normalizedIdentifiers.phones.length}`,
+      `vehicles=${normalizedIdentifiers.vehicles.length}`,
+      `emails=${normalizedIdentifiers.emails.length}`,
+      `accounts=${normalizedIdentifiers.accounts.length}`,
+      `addresses=${normalizedIdentifiers.addresses.length}`
+    );
+  } catch (err) {
+    console.warn("[caseProcessingService] Identifier extraction failed:", err.message);
+  }
 
+  // Preserve submitted audit material and searchable identifiers before the
+  // remote call. A FastAPI outage must not erase the intake record.
+  await Case.updateOne(
+    { caseId },
+    {
+      $set: {
+        status: "processing",
+        ...(normalizedCase.title ? { title: normalizedCase.title } : {}),
+        ...(normalizedCase.category ? { "metadata.category": normalizedCase.category } : {}),
+        "normalizedIdentifiers.phones": normalizedIdentifiers.phones,
+        "normalizedIdentifiers.vehicles": normalizedIdentifiers.vehicles,
+        "normalizedIdentifiers.emails": normalizedIdentifiers.emails,
+        "normalizedIdentifiers.accounts": normalizedIdentifiers.accounts,
+        "normalizedIdentifiers.addresses": normalizedIdentifiers.addresses,
+      },
+      $addToSet: {
+        textReports: { $each: normalizedCase.textReports || [] },
+        csvRecords: { $each: normalizedCase.csvRecords || [] },
+      },
+    }
+  );
+
+  // ── 3. Build caseHistory from exact identifier matches ───────────────────
+  //    Non-fatal: if lookup fails, proceed with empty history so FastAPI still runs.
+  let caseHistory = [];
+  try {
+    caseHistory = await buildExactCaseHistory(caseId, normalizedIdentifiers);
+    console.log(`[caseProcessingService] caseHistory entries: ${caseHistory.length}`);
+  } catch (err) {
+    console.error("[caseProcessingService] buildExactCaseHistory failed — empty history:", err.message);
+  }
+
+  // ── 4. Build retrievalContext from up to 3 best historical matches ────────
+  //    Non-fatal: if context building fails, send empty array.
+  let retrievalContext = [];
+  try {
+    retrievalContext = await buildRetrievalContext(
+      caseId,
+      normalizedIdentifiers,
+      normalizedCase.textReports || []
+    );
+    console.log(`[caseProcessingService] retrievalContext entries: ${retrievalContext.length}`);
+  } catch (err) {
+    console.error("[caseProcessingService] buildRetrievalContext failed — empty context:", err.message);
+  }
+
+  // ── 5. Build enriched payload and call FastAPI ───────────────────────────
   const enrichedCase = {
     ...normalizedCase,
     caseHistory,
+    retrievalContext,
+    // caseName and caseCategory are passed through for FastAPI context
+    caseName:     normalizedCase.title    || "",
+    caseCategory: normalizedCase.category || "",
   };
 
-  // 3. Call the isolated FastAPI HTTP client (Module 2 Gateway)
   let fastApiResult;
   try {
     fastApiResult = await callFastAPI(enrichedCase, options);
   } catch (err) {
-    // Mark case as 'failed' in MongoDB — never leave it stuck on 'processing'
+    // Mark case as 'failed' — never leave it stuck on 'processing'
     try {
       await Case.updateOne(
         { caseId },
@@ -125,23 +142,28 @@ const processCaseThroughFastApi = async (normalizedCase, options = {}) => {
           $set: {
             status: "failed",
             "metadata.failureReason": err.message || "FastAPI call failed",
-            "metadata.failureCode": err.code || "FASTAPI_ERROR",
-            "metadata.failedAt": new Date().toISOString(),
+            "metadata.failureCode":   err.code || "FASTAPI_ERROR",
+            "metadata.failedAt":      new Date().toISOString(),
           },
         }
       );
     } catch (updateErr) {
       console.error("[caseProcessingService] Failed to mark case as failed:", updateErr.message);
     }
-    throw err; // Re-throw original FastApiError — errorHandler formats it correctly
+    throw err;
   }
 
-  // 4. Persist AI reasoning results into MongoDB (Module 4 Store / T06)
-  const persistenceResult = await persistCaseResults(fastApiResult, normalizedCase);
+  // ── 6. Persist AI reasoning results into MongoDB ─────────────────────────
+  console.log(`[caseProcessingService] Calling persistCaseResults for ${caseId}...`);
+  const persistenceResult = await persistCaseResults(fastApiResult, {
+    ...normalizedCase,
+    normalizedIdentifiers,
+  });
+  console.log(`[caseProcessingService] persistCaseResults finished for ${caseId}.`);
 
-  // 5. Trigger cross-case background linking job (fire-and-forget)
-  runCrossCaseLinking(caseId).catch(err => {
-    console.error('[caseProcessingService] Background cross-case linking failed:', err.message);
+  // ── 7. Trigger cross-case background linking (fire-and-forget) ───────────
+  runCrossCaseLinking(caseId).catch((err) => {
+    console.error("[caseProcessingService] Background cross-case linking failed:", err.message);
   });
 
   return persistenceResult;

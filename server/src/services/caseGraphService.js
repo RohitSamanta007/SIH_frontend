@@ -2,6 +2,38 @@ const mongoose = require("mongoose");
 const { Case, Entity, Edge, Pattern } = require("../models");
 const { NotFoundError, ValidationError, BadRequestError } = require("../utils/AppError");
 
+const effectiveStatus = (edge) => edge.reviewStatus || edge.systemStatus || edge.guardrailStatus || "unknown";
+
+const mapEdge = (edge) => ({
+  id: edge.edgeId || edge._id.toString(),
+  databaseId: edge._id.toString(),
+  source: edge.source,
+  target: edge.target,
+  edgeType: edge.edgeType,
+  confidence: edge.confidence,
+  timestamp: edge.timestamp || null,
+  eventDate: edge.eventDate || null,
+  eventTime: edge.eventTime || null,
+  eventType: edge.eventType || null,
+  relationReason: edge.relationReason || null,
+  evidenceIds: edge.evidenceIds || [],
+  dateConfidence: edge.dateConfidence || "none",
+  evidence: edge.evidence || [],
+  originalStatus: edge.systemStatus || edge.guardrailStatus || "unknown",
+  systemStatus: edge.systemStatus || edge.guardrailStatus || null,
+  reviewStatus: edge.reviewStatus || null,
+  effectiveStatus: effectiveStatus(edge),
+  latestNote: edge.reviewReason || null,
+  reviewUpdatedBy: edge.reviewUpdatedBy || null,
+  reviewUpdatedAt: edge.reviewUpdatedAt || null,
+  reviewAudit: edge.reviewAudit || [],
+  guardrailStatus: edge.guardrailStatus || null,
+  guardrailRationale: edge.guardrailRationale || null,
+  attributes: edge.attributes || {},
+  associatedCases: edge.associatedCases || [],
+  createdAt: edge.createdAt,
+});
+
 /**
  * Retrieve the full graph (nodes + edges) for a given case
  *
@@ -21,11 +53,15 @@ const getCaseGraph = async (caseId) => {
     throw new NotFoundError(`Case '${normalizedCaseId}' not found`, "CASE_NOT_FOUND");
   }
 
-  // Fetch entities associated only with this case
-  const entities = await Entity.find({ associatedCases: normalizedCaseId }).lean();
-
   // Fetch edges associated only with this case
   const edges = await Edge.find({ associatedCases: normalizedCaseId }).lean();
+  const endpointIds = [...new Set(edges.flatMap((edge) => [edge.source, edge.target]).filter(Boolean))];
+  // Include endpoints of deterministic cross-case recurrence edges without
+  // mutating the historical entity's case membership.
+  const entities = await Entity.find({
+    $or: [{ associatedCases: normalizedCaseId }, { canonicalId: { $in: endpointIds } }],
+  }).lean();
+  const patterns = await Pattern.find({ caseId: normalizedCaseId }).lean();
 
   const nodes = entities.map((entity) => ({
     canonicalId: entity.canonicalId,
@@ -37,28 +73,19 @@ const getCaseGraph = async (caseId) => {
     createdAt: entity.createdAt,
   }));
 
-  const mappedEdges = edges.map((edge) => ({
-    id: edge._id.toString(),
-    source: edge.source,
-    target: edge.target,
-    edgeType: edge.edgeType,
-    confidence: edge.confidence,
-    timestamp: edge.timestamp || null,
-    evidence: edge.evidence || [],
-    guardrailStatus: edge.guardrailStatus || null,
-    guardrailRationale: edge.guardrailRationale || null,
-    attributes: edge.attributes || {},
-    associatedCases: edge.associatedCases || [],
-    createdAt: edge.createdAt,
-  }));
+  const mappedEdges = edges.map(mapEdge);
 
   return {
     caseId: normalizedCaseId,
     status: caseDoc.status,
     title: caseDoc.title || null,
     metadata: caseDoc.metadata || {},
+    retrievalSummary: caseDoc.retrievalSummary || null,
+    textReports: caseDoc.textReports || [],
+    similarCaseLeads: caseDoc.similarCaseLeads || [],
     nodes,
     edges: mappedEdges,
+    patterns,
   };
 };
 
@@ -100,21 +127,11 @@ const getEntityDetail = async (caseId, entityId) => {
 
   // Fetch only related edges globally (master graph)
   const relatedEdges = await Edge.find({
+    associatedCases: normalizedCaseId,
     $or: [{ source: normalizedEntityId }, { target: normalizedEntityId }],
   }).lean();
 
-  const mappedEdges = relatedEdges.map((edge) => ({
-    id: edge._id.toString(),
-    source: edge.source,
-    target: edge.target,
-    edgeType: edge.edgeType,
-    confidence: edge.confidence,
-    timestamp: edge.timestamp || null,
-    evidence: edge.evidence || [],
-    guardrailStatus: edge.guardrailStatus || null,
-    guardrailRationale: edge.guardrailRationale || null,
-    attributes: edge.attributes || {},
-  }));
+  const mappedEdges = relatedEdges.map(mapEdge);
 
   return {
     caseId: normalizedCaseId,
@@ -150,42 +167,39 @@ const getCaseTimeline = async (caseId) => {
     throw new NotFoundError(`Case '${normalizedCaseId}' not found`, "CASE_NOT_FOUND");
   }
 
-  // Fetch all edges for the case (supporting both legacy caseId and new Master Graph associatedCases)
-  const edges = await Edge.find({
-    $or: [{ associatedCases: normalizedCaseId }, { caseId: normalizedCaseId }],
-  }).lean();
-
-  // Deterministic chronological ordering:
-  // 1. Edges with domain event timestamps: sorted oldest -> newest (ascending)
-  // 2. Edges without domain timestamps: placed after timestamped events, ordered by createdAt
-  const sortedEdges = edges.sort((a, b) => {
-    if (a.timestamp && b.timestamp) {
-      return new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime();
-    }
-    if (a.timestamp && !b.timestamp) return -1; // timestamped items first
-    if (!a.timestamp && b.timestamp) return 1;
-    // Both without event timestamps -> fallback to createdAt
-    return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
+  const caseEdges = await Edge.find({ associatedCases: normalizedCaseId }).lean();
+  const edgeById = new Map();
+  for (const edge of caseEdges) {
+    edgeById.set(edge._id.toString(), edge);
+    if (edge.edgeId) edgeById.set(edge.edgeId, edge);
+  }
+  const represented = new Set();
+  const timelineEvents = (Array.isArray(caseDoc.timelineEvents) ? caseDoc.timelineEvents : []).map((event) => {
+    const edge = event.edgeId ? edgeById.get(event.edgeId) : null;
+    if (event.edgeId) represented.add(event.edgeId);
+    return edge ? { ...mapEdge(edge), ...event, id: event.edgeId || mapEdge(edge).id } : event;
   });
-
-  const timeline = sortedEdges.map((edge) => ({
-    id: edge._id.toString(),
-    source: edge.source,
-    target: edge.target,
-    edgeType: edge.edgeType,
-    timestamp: edge.timestamp || null,
-    evidence: edge.evidence || [],
-    confidence: edge.confidence,
-    guardrailStatus: edge.guardrailStatus || null,
-    guardrailRationale: edge.guardrailRationale || null,
-    attributes: edge.attributes || {},
-    createdAt: edge.createdAt,
-  }));
+  for (const edge of caseEdges) {
+    const id = edge.edgeId || edge._id.toString();
+    // Investigator-created relationships are not present in the immutable
+    // FastAPI timelineEvents array, so include them whether dated or undated.
+    if (!represented.has(id)) timelineEvents.push({ ...mapEdge(edge), id, edgeId: id });
+  }
+  
+  // Sort timelineEvents chronologically
+  const sortedTimeline = timelineEvents.sort((a, b) => {
+    if (!a.eventDate) return 1;
+    if (!b.eventDate) return -1;
+    const ta = new Date(a.eventDate).getTime();
+    const tb = new Date(b.eventDate).getTime();
+    if (ta !== tb) return ta - tb;
+    return (a.eventTime || "99:99:99").localeCompare(b.eventTime || "99:99:99");
+  });
 
   return {
     caseId: normalizedCaseId,
-    totalEvents: timeline.length,
-    timeline,
+    totalEvents: sortedTimeline.length,
+    timeline: sortedTimeline
   };
 };
 
@@ -213,18 +227,11 @@ const getGuardrailDetail = async (caseId, edgeId) => {
     throw new NotFoundError(`Case '${normalizedCaseId}' not found`, "CASE_NOT_FOUND");
   }
 
-  // Validate ObjectId format
-  if (!mongoose.Types.ObjectId.isValid(normalizedEdgeId)) {
-    throw new NotFoundError(
-      `Edge '${normalizedEdgeId}' not found in case '${normalizedCaseId}'`,
-      "EDGE_NOT_FOUND"
-    );
-  }
-
-  // Find Edge scoped by BOTH _id and case isolation
+  const edgeIdentity = [{ edgeId: normalizedEdgeId }];
+  if (mongoose.Types.ObjectId.isValid(normalizedEdgeId)) edgeIdentity.push({ _id: normalizedEdgeId });
   const edge = await Edge.findOne({
-    _id: normalizedEdgeId,
-    $or: [{ associatedCases: normalizedCaseId }, { caseId: normalizedCaseId }],
+    associatedCases: normalizedCaseId,
+    $or: edgeIdentity,
   }).lean();
 
   if (!edge) {
@@ -236,19 +243,8 @@ const getGuardrailDetail = async (caseId, edgeId) => {
 
   return {
     caseId: normalizedCaseId,
-    edgeId: edge._id.toString(),
-    edge: {
-      source: edge.source,
-      target: edge.target,
-      edgeType: edge.edgeType,
-      confidence: edge.confidence,
-      timestamp: edge.timestamp || null,
-      evidence: edge.evidence || [],
-      guardrailStatus: edge.guardrailStatus || "unspecified",
-      guardrailRationale: edge.guardrailRationale || null,
-      attributes: edge.attributes || {},
-      createdAt: edge.createdAt,
-    },
+    edgeId: edge.edgeId || edge._id.toString(),
+    edge: mapEdge(edge),
   };
 };
 
@@ -263,7 +259,7 @@ const getGuardrailDetail = async (caseId, edgeId) => {
 const getCasesList = async () => {
   const caseDocs = await Case.find(
     {},
-    { caseId: 1, status: 1, title: 1, metadata: 1, sourceUploads: 1, createdAt: 1, updatedAt: 1 }
+    { caseId: 1, status: 1, title: 1, metadata: 1, retrievalSummary: 1, sourceUploads: 1, createdAt: 1, updatedAt: 1 }
   )
     .sort({ updatedAt: -1 })
     .lean();
@@ -328,6 +324,7 @@ const getCasesList = async () => {
       status: caseDoc.status || "pending",
       title: caseDoc.title || null,
       metadata: caseDoc.metadata || {},
+      retrievalSummary: caseDoc.retrievalSummary || null,
       recordCount,
       uploadsCount: uploads.length,
       lastUploadAt,

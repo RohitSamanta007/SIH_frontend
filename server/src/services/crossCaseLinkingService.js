@@ -1,68 +1,28 @@
-const { Entity, Edge } = require('../models');
+"use strict";
+
+const { Entity, Edge } = require("../models");
 
 /**
  * Cross-Case Entity Linking Service
  *
  * Background job that runs after a new case is persisted.
- * For every entity in the newly completed case, it:
- *   1. Builds a property fingerprint (aliases + attribute string values)
- *   2. Queries MongoDB for entities from OTHER cases that share any fingerprint value
- *   3. Merges associatedCases arrays on matched entities (both directions)
- *   4. Creates a CROSS_CASE_MATCH edge between the matched pair (upserted)
- *   5. Pulls 1-hop neighbors of the matched entity into the new case
- *      (adds the new caseId to those neighboring edges & entity docs)
- */
-
-/**
- * Extract a flat set of matchable string values from an entity document.
- * Includes all aliases and all string/number leaf values from attributes{}.
+ * For every entity in the newly completed case, it queries MongoDB for entities
+ * from OTHER cases that share EXACT NORMALIZED IDENTIFIERS.
  *
- * @param {Object} entity - Mongoose Entity document
- * @returns {string[]} Array of normalised fingerprint values
+ * It creates a bounded recurrence edge only. It does not import unrelated
+ * neighbours or merge case membership onto historical nodes.
  */
-const buildFingerprint = (entity) => {
-  const values = new Set();
-
-  // Aliases
-  if (Array.isArray(entity.aliases)) {
-    entity.aliases.forEach((a) => {
-      if (typeof a === 'string' && a.trim()) values.add(a.trim().toLowerCase());
-    });
-  }
-
-  // Attribute leaf values (phone, email, IP, account number, etc.)
-  if (entity.attributes && typeof entity.attributes === 'object') {
-    const extractLeaves = (obj) => {
-      Object.values(obj).forEach((val) => {
-        if (typeof val === 'string' && val.trim()) {
-          values.add(val.trim().toLowerCase());
-        } else if (typeof val === 'number') {
-          values.add(String(val));
-        } else if (val && typeof val === 'object' && !Array.isArray(val)) {
-          extractLeaves(val);
-        } else if (Array.isArray(val)) {
-          val.forEach((v) => {
-            if (typeof v === 'string' && v.trim()) values.add(v.trim().toLowerCase());
-          });
-        }
-      });
-    };
-    extractLeaves(entity.attributes);
-  }
-
-  return [...values].filter((v) => v.length > 2); // Skip trivially short values
-};
 
 /**
  * Run the full cross-case linking job for a given case.
- * Safe to call multiple times — all writes are idempotent ($addToSet + upsert).
+ * Safe to call multiple times — all writes are idempotent.
  *
- * @param {string} caseId - The newly completed case ID
+ * @param {string} caseId
  * @returns {Promise<{ linked: number, edgesCreated: number, neighborsLinked: number }>}
  */
 const runCrossCaseLinking = async (caseId) => {
-  if (!caseId || typeof caseId !== 'string') {
-    throw new Error('[crossCaseLinking] Invalid caseId provided');
+  if (!caseId || typeof caseId !== "string") {
+    throw new Error("[crossCaseLinking] Invalid caseId provided");
   }
 
   const tag = `[crossCaseLinking][${caseId}]`;
@@ -73,10 +33,7 @@ const runCrossCaseLinking = async (caseId) => {
   let neighborsLinked = 0;
 
   try {
-    // Fetch all entities that belong to the new case
-    const newCaseEntities = await Entity.find({
-      associatedCases: caseId,
-    }).lean();
+    const newCaseEntities = await Entity.find({ associatedCases: caseId }).lean();
 
     if (!newCaseEntities.length) {
       console.log(`${tag} No entities found for case — skipping.`);
@@ -86,35 +43,31 @@ const runCrossCaseLinking = async (caseId) => {
     console.log(`${tag} Processing ${newCaseEntities.length} entities...`);
 
     for (const newEntity of newCaseEntities) {
-      const fingerprint = buildFingerprint(newEntity);
-      if (!fingerprint.length) continue;
+      // Build exactly matchable conditions from normalized identifier arrays
+      const orConditions = [];
 
-      // ── Step 1: Find matching entities from OTHER cases ────────────────
-      // Since MongoDB Atlas free tier disables $where, we'll build $or conditions
-      // for the most common attribute paths, plus aliases.
-      
-      const attributeOrs = fingerprint.map(fp => {
-        // We look for exact (or case-insensitive) matches in typical fields
-        return [
-          { 'attributes.phone': fp },
-          { 'attributes.email': fp },
-          { 'attributes.number': fp },
-          { 'attributes.ip': fp },
-          { 'attributes.account_number': fp },
-          { 'attributes.mac_address': fp },
-          { 'attributes.upi_id': fp }
-        ];
-      }).flat();
+      if (Array.isArray(newEntity.normalizedPhones) && newEntity.normalizedPhones.length > 0) {
+        orConditions.push({ normalizedPhones: { $in: newEntity.normalizedPhones } });
+      }
+      if (Array.isArray(newEntity.normalizedVehicles) && newEntity.normalizedVehicles.length > 0) {
+        orConditions.push({ normalizedVehicles: { $in: newEntity.normalizedVehicles } });
+      }
+      if (Array.isArray(newEntity.normalizedEmails) && newEntity.normalizedEmails.length > 0) {
+        orConditions.push({ normalizedEmails: { $in: newEntity.normalizedEmails } });
+      }
+      if (Array.isArray(newEntity.normalizedAccounts) && newEntity.normalizedAccounts.length > 0) {
+        orConditions.push({ normalizedAccounts: { $in: newEntity.normalizedAccounts } });
+      }
+      if (Array.isArray(newEntity.normalizedAddresses) && newEntity.normalizedAddresses.length > 0) {
+        orConditions.push({ normalizedAddresses: { $in: newEntity.normalizedAddresses } });
+      }
+
+      if (orConditions.length === 0) continue;
 
       const matchedEntities = await Entity.find({
-        associatedCases: { $nin: [caseId] }, // Not already in this case
-        canonicalId: { $ne: newEntity.canonicalId }, // Not the same entity
-        $or: [
-          // Match alias
-          { aliases: { $elemMatch: { $regex: fingerprint.map((f) => `^${escapeRegex(f)}$`).join('|'), $options: 'i' } } },
-          // Match standard attributes
-          ...attributeOrs
-        ],
+        associatedCases: { $nin: [caseId] },
+        canonicalId: { $ne: newEntity.canonicalId },
+        $or: orConditions,
       }).lean();
 
       if (!matchedEntities.length) continue;
@@ -122,43 +75,45 @@ const runCrossCaseLinking = async (caseId) => {
       for (const matchedEntity of matchedEntities) {
         const matchedCaseIds = matchedEntity.associatedCases || [];
 
-        // ── Step 2: Merge associatedCases (both directions) ────────────
-        await Entity.updateOne(
-          { canonicalId: matchedEntity.canonicalId },
-          { $addToSet: { associatedCases: caseId } }
-        );
-        await Entity.updateOne(
-          { canonicalId: newEntity.canonicalId },
-          { $addToSet: { associatedCases: { $each: matchedCaseIds } } }
-        );
+        const distinctHistoricalCases = [...new Set(matchedCaseIds.filter((id) => id && id !== caseId))];
+        if (distinctHistoricalCases.length === 0) continue;
         linked++;
 
-        // ── Step 3: Upsert CROSS_CASE_MATCH bridge edge ────────────────
+        // Current + one distinct historical case satisfies the two-case threshold.
         const [src, tgt] = [newEntity.canonicalId, matchedEntity.canonicalId].sort();
+        const overlaps = [];
+        for (const [label, field] of [["phone", "normalizedPhones"], ["vehicle", "normalizedVehicles"], ["email", "normalizedEmails"], ["account", "normalizedAccounts"], ["address", "normalizedAddresses"]]) {
+          const oldValues = new Set(matchedEntity[field] || []);
+          for (const value of newEntity[field] || []) if (oldValues.has(value)) overlaps.push(`${label}:${value}`);
+        }
         const bridgeEdge = await Edge.findOneAndUpdate(
           {
             source: src,
             target: tgt,
-            edgeType: 'CROSS_CASE_MATCH',
+            edgeType: "cross_case_recurrence",
           },
           {
-            $addToSet: { associatedCases: { $each: [caseId, ...matchedCaseIds] } },
+            $addToSet: { associatedCases: { $each: [caseId, ...distinctHistoricalCases] } },
             $setOnInsert: {
+              edgeId: `cross-case:${src}:${tgt}`,
               source: src,
               target: tgt,
-              edgeType: 'CROSS_CASE_MATCH',
-              guardrailStatus: 'cross_case',
-              guardrailRationale: `Entity "${newEntity.canonicalId}" from case ${caseId} shares properties with "${matchedEntity.canonicalId}" from ${matchedCaseIds.join(', ')}`,
+              edgeType: "cross_case_recurrence",
+              systemStatus: "cross_connection",
+              guardrailStatus: "cross_connection",
+              guardrailRationale: `Deterministic exact identifier recurrence across ${[caseId, ...distinctHistoricalCases].join(", ")}`,
+              relationReason: "Deterministic exact identifier match",
               confidence: 1.0,
               evidence: [
                 {
-                  matchedField: 'property_overlap',
+                  sourceReportId: "system_generated",
+                  matchedField: "exact_identifier_overlap",
                   record: {
                     newCase: caseId,
-                    matchedCase: matchedCaseIds[0],
+                    matchedCases: distinctHistoricalCases,
                     newEntityId: newEntity.canonicalId,
                     matchedEntityId: matchedEntity.canonicalId,
-                    sharedProperties: fingerprint.slice(0, 5), // Log first 5 for brevity
+                    matchedFields: overlaps,
                   },
                 },
               ],
@@ -169,40 +124,8 @@ const runCrossCaseLinking = async (caseId) => {
 
         if (bridgeEdge) edgesCreated++;
 
-        // ── Step 4: Pull 1-hop neighbors from matched entity's cases ───
-        // Find all edges where matched entity is source OR target
-        const neighborEdges = await Edge.find({
-          associatedCases: { $in: matchedCaseIds },
-          $or: [
-            { source: matchedEntity.canonicalId },
-            { target: matchedEntity.canonicalId },
-          ],
-          edgeType: { $ne: 'CROSS_CASE_MATCH' }, // Don't recurse on bridge edges
-        }).lean();
-
-        for (const neighborEdge of neighborEdges) {
-          // Add new caseId to these neighboring edges so they appear in new case graph
-          await Edge.updateOne(
-            { _id: neighborEdge._id },
-            { $addToSet: { associatedCases: caseId } }
-          );
-
-          // Also pull in the neighboring entity node
-          const neighborEntityId =
-            neighborEdge.source === matchedEntity.canonicalId
-              ? neighborEdge.target
-              : neighborEdge.source;
-
-          await Entity.updateOne(
-            { canonicalId: neighborEntityId },
-            { $addToSet: { associatedCases: caseId } }
-          );
-
-          neighborsLinked++;
-        }
-
         console.log(
-          `${tag} Linked "${newEntity.canonicalId}" ↔ "${matchedEntity.canonicalId}" (from ${matchedCaseIds[0]}), pulled ${neighborEdges.length} neighbors`
+          `${tag} Linked "${newEntity.canonicalId}" ↔ "${matchedEntity.canonicalId}" from ${distinctHistoricalCases.join(", ")}`
         );
       }
     }
@@ -217,12 +140,5 @@ const runCrossCaseLinking = async (caseId) => {
     throw err;
   }
 };
-
-/**
- * Escape special regex characters in a string value.
- * @param {string} str
- * @returns {string}
- */
-const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 module.exports = { runCrossCaseLinking };

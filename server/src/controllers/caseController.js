@@ -1,5 +1,7 @@
 const { processCaseIntake } = require("../services/caseIntakeService");
 const { processCaseThroughFastApi } = require("../services/caseProcessingService");
+const mongoose = require("mongoose");
+const { randomUUID } = require("crypto");
 const {
   getCaseGraph,
   getEntityDetail,
@@ -197,6 +199,301 @@ const updateCaseStatus = async (req, res, next) => {
   }
 };
 
+
+/**
+ * Update the investigator review status for a specific relationship edge.
+ *
+ * @route PATCH /api/cases/:caseId/relationships/:edgeId/status
+ * @access Private
+ */
+const updateRelationshipStatus = async (req, res, next) => {
+  try {
+    const { caseId, edgeId } = req.params;
+    // The request body should pass "status" and "reason" as per requirements
+    const { status, reason } = req.body;
+    
+    // Assuming auth middleware sets req.user
+    const investigatorId = req.user?.username || req.user?.id || 'unknown_investigator';
+
+    const validStatuses = ['verified', 'possible_connection', 'unverified', 'cross_connection', 'unknown'];
+    if (!status || !validStatuses.includes(status)) {
+      return res.status(400).json({ success: false, error: { message: 'Invalid review status' } });
+    }
+    if (typeof reason !== 'string' || !reason.trim()) {
+      return res.status(400).json({ success: false, error: { code: 'REASON_REQUIRED', message: 'An investigator note is required' } });
+    }
+
+    const { Edge } = require('../models');
+    
+    const edgeIdentity = [{ edgeId: edgeId.trim() }];
+    if (mongoose.Types.ObjectId.isValid(edgeId.trim())) edgeIdentity.push({ _id: edgeId.trim() });
+    const edge = await Edge.findOne({ associatedCases: caseId.trim(), $or: edgeIdentity });
+
+    if (!edge) {
+      return res.status(404).json({ success: false, error: { message: 'Edge not found in this case' } });
+    }
+
+    const previousStatus = edge.reviewStatus || edge.systemStatus || edge.guardrailStatus || 'unknown';
+    
+    edge.reviewStatus = status;
+    edge.reviewReason = typeof reason === 'string' ? reason.trim() : '';
+    edge.reviewUpdatedBy = investigatorId;
+    edge.reviewUpdatedAt = new Date();
+    if (!Array.isArray(edge.reviewAudit)) {
+      edge.reviewAudit = [];
+    }
+    
+    edge.reviewAudit.push({
+      reviewedBy: investigatorId,
+      reviewedAt: new Date(),
+      previousStatus,
+      newStatus: status,
+      note: edge.reviewReason
+    });
+
+    await edge.save();
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        id: edge.edgeId || edge._id,
+        reviewStatus: edge.reviewStatus,
+        reviewAudit: edge.reviewAudit,
+        systemStatus: edge.systemStatus || edge.guardrailStatus || null,
+        effectiveStatus: edge.reviewStatus || edge.systemStatus || edge.guardrailStatus || 'unknown',
+        latestNote: edge.reviewReason,
+        updatedBy: edge.reviewUpdatedBy,
+        updatedAt: edge.reviewUpdatedAt,
+      },
+      error: null,
+    });
+  } catch (error) {
+    if (error.name === 'CastError') {
+      return res.status(400).json({ success: false, error: { message: 'Invalid edge ID format' } });
+    }
+    next(error);
+  }
+};
+
+/**
+ * Update the investigator status for a semantic similar case lead.
+ *
+ * @route PATCH /api/cases/:caseId/similar-leads/:matchedCaseId/status
+ * @access Private
+ */
+const updateSemanticLeadStatus = async (req, res, next) => {
+  try {
+    const { caseId, matchedCaseId } = req.params;
+    const { status, reason } = req.body;
+    
+    const validStatuses = ['verified', 'possible_connection', 'cross_connection', 'unverified', 'unknown'];
+    if (!status || !validStatuses.includes(status)) {
+      return res.status(400).json({ success: false, error: { message: 'Invalid semantic lead status' } });
+    }
+
+    const { Case } = require('../models');
+    
+    const caseDoc = await Case.findOne({ caseId: caseId.trim() });
+    if (!caseDoc) {
+      return res.status(404).json({ success: false, error: { message: 'Case not found' } });
+    }
+    
+    const leadIndex = caseDoc.similarCaseLeads.findIndex(l => l.matchedCaseId === matchedCaseId);
+    if (leadIndex === -1) {
+      return res.status(404).json({ success: false, error: { message: 'Semantic lead not found in this case' } });
+    }
+    
+    const lead = caseDoc.similarCaseLeads[leadIndex];
+    if ((lead.similarityScore || 0) < 0.9) {
+      return res.status(409).json({ success: false, error: { code: 'LEAD_REVIEW_ONLY', message: 'Lower-confidence semantic leads cannot be classified.' } });
+    }
+    if (['verified', 'cross_connection'].includes(status) && !lead.referencedCaseReviewedAt) {
+      return res.status(409).json({ success: false, error: { code: 'CASE_REVIEW_REQUIRED', message: 'Open and review the referenced case before applying this status.' } });
+    }
+    const investigatorId = req.user?.username || req.user?.userId || 'unknown_investigator';
+    const previousStatus = lead.investigatorStatus || lead.status || 'unknown';
+    const updatedAt = new Date();
+    lead.investigatorStatus = status;
+    lead.investigatorReason = typeof reason === 'string' ? reason.trim() : '';
+    lead.investigatorUpdatedBy = investigatorId;
+    lead.investigatorUpdatedAt = updatedAt;
+    if (!Array.isArray(lead.reviewAudit)) lead.reviewAudit = [];
+    lead.reviewAudit.push({ updatedBy: investigatorId, updatedAt, previousStatus, status, reason: lead.investigatorReason });
+    
+    // We mark the array modified to ensure it saves
+    caseDoc.markModified('similarCaseLeads');
+    await caseDoc.save();
+
+    return res.status(200).json({
+      success: true,
+      data: {
+        matchedCaseId,
+        investigatorStatus: lead.investigatorStatus,
+        investigatorReason: lead.investigatorReason,
+        reviewAudit: lead.reviewAudit,
+      },
+      error: null,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+
+/**
+ * Persist a relationship discovered manually by an investigator between two
+ * entities already visible in this case graph. This never invokes FastAPI and
+ * never changes either entity document.
+ *
+ * @route POST /api/cases/:caseId/relationships
+ * @access Private (investigator only)
+ */
+const createManualRelationship = async (req, res, next) => {
+  try {
+    const normalizedCaseId = String(req.params.caseId || '').trim();
+    const source = String(req.body?.source || '').trim();
+    const target = String(req.body?.target || '').trim();
+    const rawEdgeType = String(req.body?.edgeType || '').trim();
+    const status = String(req.body?.status || '').trim();
+    const reason = String(req.body?.reason || '').trim();
+    const eventDate = String(req.body?.eventDate || '').trim();
+    const eventTime = String(req.body?.eventTime || '').trim();
+    const investigatorId = req.user?.username || req.user?.userId || req.user?.id || 'unknown_investigator';
+    const validStatuses = ['verified', 'possible_connection', 'cross_connection', 'unverified', 'unknown'];
+
+    if (!source || !target) {
+      return res.status(400).json({ success: false, error: { code: 'ENTITIES_REQUIRED', message: 'Select both a source and target entity' } });
+    }
+    if (source === target) {
+      return res.status(400).json({ success: false, error: { code: 'SELF_RELATIONSHIP', message: 'A relationship must connect two different entities' } });
+    }
+    if (!rawEdgeType || rawEdgeType.length > 80 || !/^[a-zA-Z0-9 _-]+$/.test(rawEdgeType)) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_RELATIONSHIP_TYPE', message: 'Enter a valid relationship type using letters, numbers, spaces, hyphens, or underscores' } });
+    }
+    if (!validStatuses.includes(status)) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_REVIEW_STATUS', message: 'Select a valid relationship status' } });
+    }
+    if (!reason) {
+      return res.status(400).json({ success: false, error: { code: 'REASON_REQUIRED', message: 'An investigator rationale is required' } });
+    }
+    const parsedEventDate = eventDate ? new Date(`${eventDate}T00:00:00Z`) : null;
+    if (eventDate && (!/^\d{4}-\d{2}-\d{2}$/.test(eventDate) || Number.isNaN(parsedEventDate.getTime()) || parsedEventDate.toISOString().slice(0, 10) !== eventDate)) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_EVENT_DATE', message: 'Event date must be a real date in YYYY-MM-DD format' } });
+    }
+    if (eventTime && !/^([01]\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(eventTime)) {
+      return res.status(400).json({ success: false, error: { code: 'INVALID_EVENT_TIME', message: 'Event time must use HH:MM or HH:MM:SS' } });
+    }
+
+    const { Case, Entity, Edge } = require('../models');
+    const caseExists = await Case.exists({ caseId: normalizedCaseId });
+    if (!caseExists) {
+      return res.status(404).json({ success: false, error: { code: 'CASE_NOT_FOUND', message: 'Case not found' } });
+    }
+
+    // A graph can include a historical endpoint without adding that entity to
+    // this case. Include those existing edge endpoints in the allowed scope.
+    const currentEdges = await Edge.find({ associatedCases: normalizedCaseId }).select('source target').lean();
+    const graphEntityIds = new Set(currentEdges.flatMap((edge) => [edge.source, edge.target]).filter(Boolean));
+    const selectedEntities = await Entity.find({
+      canonicalId: { $in: [source, target] },
+      $or: [
+        { associatedCases: normalizedCaseId },
+        { canonicalId: { $in: [...graphEntityIds] } },
+      ],
+    }).select('canonicalId').lean();
+    const selectedIds = new Set(selectedEntities.map((entity) => entity.canonicalId));
+    if (!selectedIds.has(source) || !selectedIds.has(target)) {
+      return res.status(404).json({ success: false, error: { code: 'ENTITY_NOT_IN_CASE_GRAPH', message: 'One or both selected entities are not available in this case graph' } });
+    }
+
+    const edgeType = rawEdgeType.toLowerCase().replace(/\s+/g, '_');
+    const duplicate = await Edge.findOne({ source, target, edgeType });
+    if (duplicate) {
+      return res.status(409).json({ success: false, error: { code: 'RELATIONSHIP_EXISTS', message: 'This relationship already exists; open it to update its status or note' } });
+    }
+
+    const now = new Date();
+    const edgeId = `manual-${randomUUID()}`;
+    const edge = await Edge.create({
+      associatedCases: [normalizedCaseId],
+      edgeId,
+      source,
+      target,
+      edgeType,
+      confidence: 1,
+      eventDate: eventDate || undefined,
+      eventTime: eventTime || undefined,
+      eventType: edgeType,
+      relationReason: reason,
+      dateConfidence: eventDate ? 'explicit' : 'none',
+      reviewStatus: status,
+      reviewReason: reason,
+      reviewUpdatedBy: investigatorId,
+      reviewUpdatedAt: now,
+      reviewAudit: [{ reviewedBy: investigatorId, reviewedAt: now, previousStatus: 'unknown', newStatus: status, note: reason }],
+      attributes: { createdManually: true },
+      evidence: [{
+        sourceReportId: 'investigator_manual',
+        matchedField: 'manual_relationship',
+        record: { summary: reason },
+        metadata: { createdBy: investigatorId, createdAt: now },
+      }],
+    });
+
+    return res.status(201).json({
+      success: true,
+      data: {
+        id: edge.edgeId,
+        edgeId: edge.edgeId,
+        source: edge.source,
+        target: edge.target,
+        edgeType: edge.edgeType,
+        confidence: edge.confidence,
+        eventDate: edge.eventDate || null,
+        eventTime: edge.eventTime || null,
+        eventType: edge.eventType,
+        relationReason: edge.relationReason,
+        dateConfidence: edge.dateConfidence,
+        originalStatus: 'unknown',
+        systemStatus: null,
+        reviewStatus: edge.reviewStatus,
+        effectiveStatus: edge.reviewStatus,
+        latestNote: edge.reviewReason,
+        reviewUpdatedBy: edge.reviewUpdatedBy,
+        reviewUpdatedAt: edge.reviewUpdatedAt,
+        reviewAudit: edge.reviewAudit,
+        evidence: edge.evidence,
+        attributes: edge.attributes,
+        associatedCases: edge.associatedCases,
+      },
+      error: null,
+    });
+  } catch (error) {
+    if (error?.code === 11000) {
+      return res.status(409).json({ success: false, error: { code: 'RELATIONSHIP_EXISTS', message: 'This relationship already exists; open it to update its status or note' } });
+    }
+    next(error);
+  }
+};
+
+const markSemanticLeadReviewed = async (req, res, next) => {
+  try {
+    const { caseId, matchedCaseId } = req.params;
+    const { Case } = require('../models');
+    const caseDoc = await Case.findOne({ caseId: caseId.trim() });
+    if (!caseDoc) return res.status(404).json({ success: false, error: { code: 'CASE_NOT_FOUND', message: 'Case not found' } });
+    const lead = caseDoc.similarCaseLeads.find((item) => item.matchedCaseId === matchedCaseId);
+    if (!lead) return res.status(404).json({ success: false, error: { code: 'LEAD_NOT_FOUND', message: 'Semantic lead not found in this case' } });
+    const referencedCase = await Case.exists({ caseId: matchedCaseId });
+    if (!referencedCase) return res.status(404).json({ success: false, error: { code: 'REFERENCED_CASE_UNAVAILABLE', message: 'The referenced case is unavailable' } });
+    lead.referencedCaseReviewedAt = new Date();
+    caseDoc.markModified('similarCaseLeads');
+    await caseDoc.save();
+    return res.status(200).json({ success: true, data: { matchedCaseId, referencedCaseReviewedAt: lead.referencedCaseReviewedAt }, error: null });
+  } catch (error) {
+    next(error);
+  }
+};
+
 module.exports = {
   createCaseIntake,
   listCases,
@@ -205,4 +502,8 @@ module.exports = {
   fetchCaseTimeline,
   fetchGuardrailDetail,
   updateCaseStatus,
+  updateRelationshipStatus,
+  createManualRelationship,
+  updateSemanticLeadStatus,
+  markSemanticLeadReviewed,
 };

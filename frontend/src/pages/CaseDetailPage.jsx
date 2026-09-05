@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useParams, useNavigate, Link } from 'react-router-dom';
 import apiClient from '../api/apiClient.js';
 import { useAuth } from '../state/authContext.jsx';
 import NetworkGraph from '../components/graph/NetworkGraph.jsx';
@@ -15,11 +15,17 @@ const STATUS_BADGE_CLASSES = {
   processing: 'bg-[#ffefcf] text-[#ab570a]',
   verified: 'bg-[#d1fae5] text-[#065f46]',
   approved: 'bg-[#d1fae5] text-[#065f46]',
+  possible_connection: 'bg-[#ffefcf] text-[#ab570a]',
+  cross_connection: 'bg-[#ede9fe] text-[#6d28d9]',
+  unknown_connection: 'bg-[#f3f4f6] text-[#374151]',
   rejected: 'bg-[#fee2e2] text-[#991b1b]',
   flagged: 'bg-[#ffefcf] text-[#ab570a]',
   unspecified: 'bg-[#f3f4f6] text-[#374151]',
-  open: 'bg-[#d1fae5] text-[#065f46]', // light green
-  closed: 'bg-[#fee2e2] text-[#991b1b]', // light red
+  unverified: 'bg-[#fee2e2] text-[#991b1b]',
+  unknown: 'bg-[#f3f4f6] text-[#374151]',
+  similar_case_lead: 'bg-[#ffefcf] text-[#ab570a]',
+  open: 'bg-[#d1fae5] text-[#065f46]',
+  closed: 'bg-[#fee2e2] text-[#991b1b]',
 };
 
 const GRAPH_LAYOUT_COLUMNS = 4;
@@ -121,101 +127,495 @@ function buildGraphPayload(graphData) {
   return { flowNodes, flowEdges, unmappedNodes, unmappedEdges };
 }
 
-function TimelineEventRow({ event, index, getEntityName, onClick }) {
+const DCT_LABELS = {
+  verified: 'Verified',
+  possible_connection: 'Possible Connection',
+  cross_connection: 'Cross-Case Connection',
+  unknown_connection: 'Unknown Connection',
+};
+
+export function TimelineEventRow({ event, index, getEntityName, onClick, caseId, onStatusChange }) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const ts = formatTimelineTimestamp(event?.timestamp);
+
+  const eventDate = typeof event?.eventDate === 'string' ? event.eventDate : null;
+  const eventTime = typeof event?.eventTime === 'string' ? event.eventTime : null;
+  const eventTypeLabel = typeof event?.eventTypeLabel === 'string'
+    ? event.eventTypeLabel
+    : (event?.eventType ? friendlyLabel(event.eventType) : '');
+  const relationReason = typeof event?.relationReason === 'string' ? event.relationReason : '';
+  const dateConfidence = typeof event?.dateConfidence === 'string' ? event.dateConfidence : '';
+  
+  const displayDate = eventDate ? `${eventDate}${eventTime ? ` ${eventTime}` : ''}` : null;
+  
   const source = typeof event?.source === 'string' ? event.source.trim() : '';
   const target = typeof event?.target === 'string' ? event.target.trim() : '';
   const edgeType = typeof event?.edgeType === 'string' ? event.edgeType.trim() : '';
-  const evidenceCount = Array.isArray(event?.evidence) ? event.evidence.length : null;
-
+  const evidence = Array.isArray(event?.evidence) ? event.evidence : [];
   const sourceName = getEntityName(source);
   const targetName = getEntityName(target);
-  
+  const dct = event?.displayConnectionType || event?.effectiveStatus || 'unknown';
+  const rationale = event?.guardrailRationale || null;
+  const relatedPatterns = Array.isArray(event?.relatedPatterns) ? event.relatedPatterns : [];
   const key = typeof event?.id === 'string' && event.id.trim() ? event.id.trim() : `timeline-${index}`;
+  const edgeId = typeof event?.edgeId === 'string' && event.edgeId.trim()
+    ? event.edgeId.trim()
+    : (typeof event?.id === 'string' ? event.id.trim() : '');
 
   return (
     <li key={key} className="flex flex-col border-b border-[#ebebeb] last:border-0 bg-white">
-      <div className="flex w-full items-start gap-4 px-6 py-4 text-left transition-colors">
-        <p className="w-44 shrink-0 font-mono text-xs leading-5 text-[#888888] pt-0.5">{ts ?? 'Undated'}</p>
+      {/* Header row — always visible */}
+      <button
+        type="button"
+        onClick={() => { setIsExpanded(prev => !prev); onClick?.(); }}
+        className="flex w-full items-start gap-4 px-6 py-4 text-left transition-colors hover:bg-[#fafafa]"
+      >
+        <div className="w-44 shrink-0 pt-0.5 flex flex-col">
+          <p className="font-mono text-xs leading-5 text-[#888888]">
+            {displayDate
+              ? event?.isAnalysisTimestamp
+                ? <><span>{displayDate}</span><span className="ml-1 text-[#a1a1a1]">(analysis)</span></>
+                : displayDate
+              : 'Undated'}
+          </p>
+          {dateConfidence && (
+            <p className="font-mono text-[10px] text-[#a1a1a1]">Confidence: {dateConfidence}</p>
+          )}
+        </div>
         <div className="min-w-0 flex-1">
           <p className="truncate font-mono text-sm text-[#171717] font-medium" title={`${sourceName} ↔ ${targetName}`}>
             {sourceName} <span className="text-[#a1a1a1] mx-1">↔</span> {targetName}
           </p>
-          {(edgeType || evidenceCount !== null) && (
-            <p className="mt-1 font-mono text-xs uppercase tracking-wide text-[#888888]">
-              {edgeType && <span>{edgeType}</span>}
-              {edgeType && evidenceCount !== null && <span className="mx-1 text-[#ebebeb]">·</span>}
-              {evidenceCount !== null && <span>{evidenceCount} evidence {evidenceCount === 1 ? 'record' : 'records'}</span>}
-            </p>
-          )}
+          <div className="mt-1 flex flex-wrap items-center gap-2">
+            {(edgeType || eventTypeLabel) && (
+              <span className="font-mono text-xs uppercase tracking-wide text-[#888888]">{eventTypeLabel || edgeType}</span>
+            )}
+            <StatusBadge status={dct} />
+          </div>
         </div>
-      </div>
+        <svg
+          className={`h-4 w-4 shrink-0 text-[#888888] transition-transform ${isExpanded ? 'rotate-180' : ''}`}
+          fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {/* Expandable detail panel */}
+      {isExpanded && (
+        <div className="border-t border-[#ebebeb] bg-[#fafafa] px-6 py-5 space-y-4">
+
+          {/* Entities */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Source Entity</p>
+              <p className="mt-1 font-mono text-sm text-[#171717] break-all">{sourceName}</p>
+              <p className="font-mono text-xs text-[#a1a1a1] break-all">{source}</p>
+            </div>
+            <div>
+              <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Target Entity</p>
+              <p className="mt-1 font-mono text-sm text-[#171717] break-all">{targetName}</p>
+              <p className="font-mono text-xs text-[#a1a1a1] break-all">{target}</p>
+            </div>
+          </div>
+
+          {/* Relationship & guardrail */}
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Relationship Type</p>
+              <p className="mt-1 text-sm text-[#171717]">{eventTypeLabel || edgeType || '—'}</p>
+              {relationReason && <p className="mt-1 text-sm text-[#4d4d4d]">{relationReason}</p>}
+            </div>
+            <div>
+              <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Guardrail Status</p>
+              <div className="mt-1">
+                <StatusBadge status={event?.guardrailStatus || 'unknown_connection'} />
+              </div>
+            </div>
+          </div>
+
+          {/* Display connection type */}
+          <div>
+            <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Connection Classification</p>
+            <div className="mt-1"><StatusBadge status={dct} /></div>
+            <p className="mt-0.5 font-mono text-xs text-[#888888]">{DCT_LABELS[dct] || dct}</p>
+          </div>
+
+          {caseId && edgeId && onStatusChange && (
+            <div className="rounded-md border border-[#ebebeb] bg-white p-4">
+              <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Investigator relationship status</p>
+              <p className="mt-1 text-sm text-[#4d4d4d]">
+                Add a note, then choose the status that should be shown for this connection.
+              </p>
+              <div className="mt-3 max-w-sm">
+                <EdgeReviewDropdown
+                  caseId={caseId}
+                  edgeId={edgeId}
+                  currentStatus={event?.reviewStatus || event?.effectiveStatus || event?.guardrailStatus || 'unknown'}
+                  currentReason={event?.latestNote}
+                  auditHistory={event?.reviewAudit}
+                  onStatusChange={(newStatus, saved) => onStatusChange(edgeId, newStatus, saved)}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Guardrail rationale */}
+          <div>
+            <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Analytical Rationale</p>
+            <p className="mt-1 text-sm leading-5 text-[#4d4d4d]">
+              {rationale && rationale.trim()
+                ? rationale
+                : 'No analytical rationale was returned for this relationship. Review the supporting evidence before drawing a conclusion.'}
+            </p>
+          </div>
+
+          {/* Patterns */}
+          {relatedPatterns.length > 0 && (
+            <div>
+              <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Detected Patterns</p>
+              <ul className="mt-2 space-y-2">
+                {relatedPatterns.map((p, i) => (
+                  <li key={i} className="rounded-md border border-[#ebebeb] bg-white px-3 py-2">
+                    <p className="font-mono text-xs font-semibold text-[#6d28d9]">{p.patternType}</p>
+                    {p.description && <p className="mt-1 text-xs text-[#4d4d4d]">{p.description}</p>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {/* Evidence */}
+          <div>
+            <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">
+              Evidence · {evidence.length}
+            </p>
+            {evidence.length === 0 ? (
+              <p className="mt-1 text-sm text-[#4d4d4d]">No evidence records.</p>
+            ) : (
+              <ol className="mt-2 space-y-2">
+                {evidence.map((item, idx) => (
+                  <li key={idx} className="rounded-md border border-[#ebebeb] bg-white px-3 py-3">
+                    {item?.sourceReportId && (
+                      <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">
+                        Source: {item.sourceReportId}
+                      </p>
+                    )}
+                    {item?.matchedField && (
+                      <p className="mt-1 font-mono text-xs text-[#171717]">Field: {item.matchedField}</p>
+                    )}
+                  </li>
+                ))}
+              </ol>
+            )}
+          </div>
+
+        </div>
+      )}
     </li>
   );
 }
 
 
+export function EdgeReviewDropdown({ caseId, edgeId, currentStatus, currentReason, auditHistory, onStatusChange }) {
+  const [updating, setUpdating] = useState(false);
+  const [reason, setReason] = useState('');
+  const [validationMessage, setValidationMessage] = useState('');
+
+  const handleChange = async (e) => {
+    const newStatus = e.target.value;
+    if (!newStatus || newStatus === currentStatus) return;
+    if (!reason.trim()) {
+      setValidationMessage('Enter an investigator note before saving a new status.');
+      return;
+    }
+    setValidationMessage('');
+    const previousStatus = currentStatus;
+    onStatusChange(newStatus);
+    setUpdating(true);
+    try {
+      const res = await apiClient.patch(`/cases/${encodeURIComponent(caseId)}/relationships/${encodeURIComponent(edgeId)}/status`, {
+        status: newStatus,
+        reason
+      });
+      if (res.data?.success) {
+        onStatusChange(newStatus, res.data.data);
+        setReason('');
+      }
+    } catch (err) {
+      onStatusChange(previousStatus || null);
+      console.error('Failed to update status', err);
+      alert(err.response?.data?.error?.message || 'Failed to update status.');
+    } finally {
+      setUpdating(false);
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <label className="block text-xs text-[#4d4d4d]" htmlFor={`edge-note-${edgeId}`}>Investigator note</label>
+      <input
+        id={`edge-note-${edgeId}`}
+        value={reason}
+        onChange={(event) => {
+          setReason(event.target.value);
+          if (event.target.value.trim()) setValidationMessage('');
+        }}
+        placeholder="Reason for this decision"
+        className="h-9 w-full rounded-md border border-[#ebebeb] bg-white px-3 text-sm text-[#171717]"
+      />
+      <select
+        aria-label="Relationship status"
+        value={currentStatus || 'unknown'}
+        onChange={handleChange}
+        disabled={updating}
+        className="block w-full rounded-md border border-[#ebebeb] bg-white px-3 py-1.5 text-sm text-[#171717] shadow-sm focus:border-[#171717] focus:outline-none focus:ring-1 focus:ring-[#171717] disabled:opacity-50"
+      >
+        <option value="verified">Verified</option>
+        <option value="possible_connection">Possible connection</option>
+        <option value="cross_connection">Cross-case connection</option>
+        <option value="unverified">Unverified</option>
+        <option value="unknown">Unknown</option>
+      </select>
+      {validationMessage && <p role="alert" className="text-xs text-[#c50000]">{validationMessage}</p>}
+      {updating && <span className="text-xs text-[#888888]">Saving...</span>}
+      {currentReason && (
+        <div className="rounded-md bg-[#fafafa] px-3 py-2">
+          <p className="font-mono text-[10px] uppercase tracking-wide text-[#888888]">Latest saved reason</p>
+          <p className="mt-1 text-sm text-[#4d4d4d]">{currentReason}</p>
+        </div>
+      )}
+      {Array.isArray(auditHistory) && auditHistory.length > 0 && (
+        <details className="rounded-md border border-[#ebebeb] bg-[#fafafa] px-3 py-2">
+          <summary className="cursor-pointer font-mono text-[10px] uppercase tracking-wide text-[#888888]">
+            Status history · {auditHistory.length}
+          </summary>
+          <ol className="mt-2 space-y-2">
+            {auditHistory.slice().reverse().map((entry, index) => (
+              <li key={`${entry.reviewedAt || entry.updatedAt || index}-${index}`} className="text-xs text-[#4d4d4d]">
+                <span className="font-medium text-[#171717]">
+                  {friendlyLabel(entry.previousStatus || 'unknown')} → {friendlyLabel(entry.newStatus || entry.status || 'unknown')}
+                </span>
+                {(entry.note || entry.reason) && <span> — {entry.note || entry.reason}</span>}
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
+    </div>
+  );
+}
+
+const RELATIONSHIP_TYPE_OPTIONS = [
+  ['owns', 'Owns'],
+  ['associated_with', 'Associated with'],
+  ['shared_phone', 'Shared phone'],
+  ['shared_address', 'Shared address'],
+  ['telecom_link', 'Telecom link'],
+  ['co-mention', 'Co-mention'],
+];
+
+export function ManualRelationshipForm({ caseId, nodes, onCreated }) {
+  const availableNodes = Array.isArray(nodes)
+    ? nodes.filter((node) => typeof node?.canonicalId === 'string' && node.canonicalId.trim())
+    : [];
+  const [source, setSource] = useState('');
+  const [target, setTarget] = useState('');
+  const [relationshipType, setRelationshipType] = useState('associated_with');
+  const [customType, setCustomType] = useState('');
+  const [status, setStatus] = useState('possible_connection');
+  const [reason, setReason] = useState('');
+  const [eventDate, setEventDate] = useState('');
+  const [eventTime, setEventTime] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  const [error, setError] = useState('');
+
+  const nodeLabel = (node) => {
+    const alias = Array.isArray(node.aliases) && node.aliases.find((value) => typeof value === 'string' && value.trim());
+    return alias ? `${alias} (${node.canonicalId})` : node.canonicalId;
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setMessage('');
+    setError('');
+    const edgeType = relationshipType === 'custom' ? customType.trim() : relationshipType;
+    if (!source || !target) {
+      setError('Select both nodes to create a connection.');
+      return;
+    }
+    if (source === target) {
+      setError('Choose two different nodes.');
+      return;
+    }
+    if (!edgeType) {
+      setError('Enter a custom relationship type.');
+      return;
+    }
+    if (!reason.trim()) {
+      setError('Add the evidence or rationale for this connection.');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      const response = await apiClient.post(`/cases/${encodeURIComponent(caseId)}/relationships`, {
+        source,
+        target,
+        edgeType,
+        status,
+        reason: reason.trim(),
+        eventDate: eventDate || undefined,
+        eventTime: eventTime || undefined,
+      });
+      const savedEdge = response.data?.data;
+      if (!response.data?.success || !savedEdge) throw new Error('The server did not return the saved relationship.');
+      setSource('');
+      setTarget('');
+      setRelationshipType('associated_with');
+      setCustomType('');
+      setStatus('possible_connection');
+      setReason('');
+      setEventDate('');
+      setEventTime('');
+      setMessage('Connection saved. It is now visible in the graph and timeline.');
+      onCreated?.(savedEdge);
+    } catch (requestError) {
+      setError(requestError.response?.data?.error?.message || requestError.message || 'Could not save this connection.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="mt-8 rounded-xl bg-white" style={{ boxShadow: CARD_SHADOW }} aria-labelledby="manual-connection-title">
+      <details>
+        <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-6 py-4 marker:hidden">
+          <div>
+            <h2 id="manual-connection-title" className="text-sm font-semibold text-[#171717]">Add investigator connection</h2>
+            <p className="mt-1 text-sm text-[#4d4d4d]">Link two currently unconnected nodes when new evidence establishes a relationship.</p>
+          </div>
+          <span className="shrink-0 rounded-md bg-[#171717] px-3 py-1.5 text-sm font-medium text-white">Add connection</span>
+        </summary>
+        <form onSubmit={handleSubmit} className="border-t border-[#ebebeb] px-6 py-5">
+          {availableNodes.length < 2 ? (
+            <p className="text-sm text-[#4d4d4d]">At least two case entities are required before a connection can be added.</p>
+          ) : (
+            <div className="grid gap-4 md:grid-cols-2">
+              <label className="text-sm text-[#4d4d4d]">
+                Source node
+                <select aria-label="Source node" required value={source} onChange={(event) => setSource(event.target.value)} className="mt-1 block h-10 w-full rounded-md border border-[#d4d4d4] bg-white px-3 text-sm text-[#171717]">
+                  <option value="">Select source</option>
+                  {availableNodes.map((node) => <option key={node.canonicalId} value={node.canonicalId} disabled={node.canonicalId === target}>{nodeLabel(node)}</option>)}
+                </select>
+              </label>
+              <label className="text-sm text-[#4d4d4d]">
+                Target node
+                <select aria-label="Target node" required value={target} onChange={(event) => setTarget(event.target.value)} className="mt-1 block h-10 w-full rounded-md border border-[#d4d4d4] bg-white px-3 text-sm text-[#171717]">
+                  <option value="">Select target</option>
+                  {availableNodes.map((node) => <option key={node.canonicalId} value={node.canonicalId} disabled={node.canonicalId === source}>{nodeLabel(node)}</option>)}
+                </select>
+              </label>
+              <label className="text-sm text-[#4d4d4d]">
+                Relationship type
+                <select aria-label="Relationship type" value={relationshipType} onChange={(event) => setRelationshipType(event.target.value)} className="mt-1 block h-10 w-full rounded-md border border-[#d4d4d4] bg-white px-3 text-sm text-[#171717]">
+                  {RELATIONSHIP_TYPE_OPTIONS.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                  <option value="custom">Custom relationship…</option>
+                </select>
+              </label>
+              <label className="text-sm text-[#4d4d4d]">
+                Initial status
+                <select aria-label="Initial relationship status" value={status} onChange={(event) => setStatus(event.target.value)} className="mt-1 block h-10 w-full rounded-md border border-[#d4d4d4] bg-white px-3 text-sm text-[#171717]">
+                  <option value="verified">Verified</option>
+                  <option value="possible_connection">Possible connection</option>
+                  <option value="cross_connection">Cross-case connection</option>
+                  <option value="unverified">Unverified</option>
+                  <option value="unknown">Unknown</option>
+                </select>
+              </label>
+              {relationshipType === 'custom' && (
+                <label className="text-sm text-[#4d4d4d] md:col-span-2">
+                  Custom relationship type
+                  <input aria-label="Custom relationship type" maxLength={80} required value={customType} onChange={(event) => setCustomType(event.target.value)} placeholder="e.g. transferred_funds_to" className="mt-1 block h-10 w-full rounded-md border border-[#d4d4d4] bg-white px-3 text-sm text-[#171717]" />
+                </label>
+              )}
+              <label className="text-sm text-[#4d4d4d] md:col-span-2">
+                Evidence / investigator rationale
+                <textarea aria-label="Connection rationale" required rows={3} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Describe the evidence that supports this new connection" className="mt-1 block w-full rounded-md border border-[#d4d4d4] bg-white px-3 py-2 text-sm text-[#171717]" />
+              </label>
+              <label className="text-sm text-[#4d4d4d]">
+                Event date <span className="text-[#888888]">(optional)</span>
+                <input aria-label="Connection event date" type="date" value={eventDate} onChange={(event) => setEventDate(event.target.value)} className="mt-1 block h-10 w-full rounded-md border border-[#d4d4d4] bg-white px-3 text-sm text-[#171717]" />
+              </label>
+              <label className="text-sm text-[#4d4d4d]">
+                Event time <span className="text-[#888888]">(optional)</span>
+                <input aria-label="Connection event time" type="time" value={eventTime} onChange={(event) => setEventTime(event.target.value)} className="mt-1 block h-10 w-full rounded-md border border-[#d4d4d4] bg-white px-3 text-sm text-[#171717]" />
+              </label>
+            </div>
+          )}
+          {error && <p role="alert" className="mt-4 rounded-md bg-[#f7d4d6] px-3 py-2 text-sm text-[#c50000]">{error}</p>}
+          {message && <p role="status" className="mt-4 rounded-md bg-[#d1fae5] px-3 py-2 text-sm text-[#065f46]">{message}</p>}
+          {availableNodes.length >= 2 && (
+            <div className="mt-5 flex justify-end">
+              <button type="submit" disabled={saving} className="h-9 rounded-md bg-[#171717] px-4 text-sm font-medium text-white transition-opacity hover:opacity-85 disabled:cursor-wait disabled:opacity-50">
+                {saving ? 'Saving connection…' : 'Save connection'}
+              </button>
+            </div>
+          )}
+        </form>
+      </details>
+    </section>
+  );
+}
+
 // Timeline range scrubber — rendered below the graph
-function TimelineScrubber({ bounds, activeRange, onChange }) {
-  const totalMs = bounds.max - bounds.min;
+export function TimelineScrubber({ bounds, activeRange, onChange }) {
   const timestamps = bounds.timestamps || [];
+  const trackRef = useRef(null);
+  const draggingRef = useRef(false);
+  const currentEnd = activeRange ? new Date(activeRange.end).getTime() : bounds.max;
+  const matchedIndex = timestamps.findIndex((timestamp) => timestamp >= currentEnd);
+  const currentIndex = matchedIndex === -1 ? Math.max(0, timestamps.length - 1) : matchedIndex;
+  const fmtDate = (ms) => new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  const selectIndex = (index) => {
+    if (!timestamps.length) return;
+    const bounded = Math.max(0, Math.min(timestamps.length - 1, index));
+    onChange({ start: new Date(bounds.min).toISOString(), end: new Date(timestamps[bounded]).toISOString() });
+  };
+  const selectPointer = (clientX) => {
+    const rect = trackRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0) return;
+    const ratio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const target = bounds.min + ratio * (bounds.max - bounds.min);
+    let nearest = 0;
+    timestamps.forEach((timestamp, index) => {
+      if (Math.abs(timestamp - target) < Math.abs(timestamps[nearest] - target)) nearest = index;
+    });
+    selectIndex(nearest);
+  };
 
-  const snapToNearest = (ms) => {
-    if (!timestamps.length) return ms;
-    return timestamps.reduce((prev, curr) => 
-      Math.abs(curr - ms) < Math.abs(prev - ms) ? curr : prev
+  if (timestamps.length === 0) {
+    return (
+      <div className="px-6 py-4 border-t border-[#ebebeb] bg-[#fafafa]">
+        <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Timeline filter</p>
+        <p className="mt-2 text-sm text-[#4d4d4d]">No dated investigation events</p>
+      </div>
     );
-  };
-
-  const startPct = activeRange
-    ? ((new Date(activeRange.start).getTime() - bounds.min) / totalMs) * 100
-    : 0;
-  const endPct = activeRange
-    ? ((new Date(activeRange.end).getTime() - bounds.min) / totalMs) * 100
-    : 100;
-
-  const fmtDate = (ms) =>
-    new Date(ms).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
-
-  const handleStartChange = (e) => {
-    const pct = Number(e.target.value);
-    const rawStart = bounds.min + (pct / 100) * totalMs;
-    const snappedStart = snapToNearest(rawStart);
-    const curEnd = activeRange ? new Date(activeRange.end).getTime() : bounds.max;
-    
-    if (snappedStart >= curEnd) return;
-    onChange({ start: new Date(snappedStart).toISOString(), end: new Date(curEnd).toISOString() });
-  };
-
-  const handleEndChange = (e) => {
-    const pct = Number(e.target.value);
-    const rawEnd = bounds.min + (pct / 100) * totalMs;
-    const snappedEnd = snapToNearest(rawEnd);
-    const curStart = activeRange ? new Date(activeRange.start).getTime() : bounds.min;
-    
-    if (snappedEnd <= curStart) return;
-    onChange({ start: new Date(curStart).toISOString(), end: new Date(snappedEnd).toISOString() });
-  };
-
-  const handleReset = () => onChange(null);
-
-  const displayStart = activeRange
-    ? fmtDate(new Date(activeRange.start).getTime())
-    : fmtDate(bounds.min);
-  const displayEnd = activeRange
-    ? fmtDate(new Date(activeRange.end).getTime())
-    : fmtDate(bounds.max);
+  }
+  const displayEnd = fmtDate(timestamps[currentIndex]);
+  const totalMs = bounds.max - bounds.min;
+  const progress = totalMs === 0 ? 0 : ((timestamps[currentIndex] - bounds.min) / totalMs) * 100;
 
   return (
     <div className="px-6 py-4 border-t border-[#ebebeb] bg-[#fafafa]">
       <div className="flex items-center justify-between mb-2">
         <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">
-          Timeline Filter
+          Investigation date (cumulative)
         </p>
-        {activeRange && (
+        {timestamps.length > 1 && activeRange && currentEnd < bounds.max && (
           <button
-            onClick={handleReset}
+            type="button"
+            onClick={() => onChange(null)}
             className="font-mono text-xs text-[#888888] hover:text-[#171717] transition-colors underline underline-offset-2"
           >
             Reset
@@ -223,18 +623,47 @@ function TimelineScrubber({ bounds, activeRange, onChange }) {
         )}
       </div>
 
-      {/* Date labels */}
+      <p className="mb-2 text-sm text-[#171717]">Selected date: <span className="font-mono">{displayEnd}</span></p>
       <div className="flex justify-between mb-1">
-        <span className="font-mono text-xs text-[#0761d1] font-medium">{displayStart}</span>
-        <span className="font-mono text-xs text-[#0761d1] font-medium">{displayEnd}</span>
+        <span className="font-mono text-xs text-[#888888]">{fmtDate(bounds.min)}</span>
+        <span className="font-mono text-xs text-[#0761d1] font-medium text-right flex-1">{displayEnd}</span>
+        <span className="font-mono text-xs text-[#888888] text-right" style={{minWidth: '70px'}}>{fmtDate(bounds.max)}</span>
       </div>
 
-      {/* Track */}
-      <div className="relative h-6 flex items-center">
-        {/* Background track */}
+      <div
+        ref={trackRef}
+        role="slider"
+        tabIndex={timestamps.length > 1 ? 0 : -1}
+        aria-label="Select investigation date"
+        aria-valuemin={0}
+        aria-valuemax={Math.max(0, timestamps.length - 1)}
+        aria-valuenow={currentIndex}
+        aria-valuetext={displayEnd}
+        aria-disabled={timestamps.length === 1}
+        className={`relative flex h-8 touch-none items-center ${timestamps.length > 1 ? 'cursor-pointer' : 'cursor-default'}`}
+        onClick={(event) => timestamps.length > 1 && selectPointer(event.clientX)}
+        onPointerDown={(event) => {
+          if (timestamps.length <= 1) return;
+          draggingRef.current = true;
+          event.currentTarget.setPointerCapture?.(event.pointerId);
+          selectPointer(event.clientX);
+        }}
+        onPointerMove={(event) => draggingRef.current && selectPointer(event.clientX)}
+        onPointerUp={(event) => {
+          draggingRef.current = false;
+          event.currentTarget.releasePointerCapture?.(event.pointerId);
+        }}
+        onPointerCancel={() => { draggingRef.current = false; }}
+        onKeyDown={(event) => {
+          if (timestamps.length <= 1) return;
+          if (event.key === 'ArrowLeft') { event.preventDefault(); selectIndex(currentIndex - 1); }
+          if (event.key === 'ArrowRight') { event.preventDefault(); selectIndex(currentIndex + 1); }
+          if (event.key === 'Home') { event.preventDefault(); selectIndex(0); }
+          if (event.key === 'End') { event.preventDefault(); selectIndex(timestamps.length - 1); }
+        }}
+      >
         <div className="absolute w-full h-1.5 rounded-full bg-[#ebebeb]" />
-        
-        {/* Tick marks for each timestamp */}
+        <div className="absolute h-1.5 rounded-full bg-[#0761d1]" style={{ left: 0, width: `${progress}%` }} />
         {timestamps.map((ts, idx) => {
           const pct = totalMs === 0 ? 0 : ((ts - bounds.min) / totalMs) * 100;
           return (
@@ -246,50 +675,211 @@ function TimelineScrubber({ bounds, activeRange, onChange }) {
             />
           );
         })}
-        {/* Active range highlight */}
-        <div
-          className="absolute h-1.5 rounded-full bg-[#0761d1]"
-          style={{ left: `${startPct}%`, width: `${endPct - startPct}%` }}
-        />
-        {/* Start thumb */}
-        <input
-          type="range"
-          min={0}
-          max={100}
-          step={0.1}
-          value={startPct}
-          onChange={handleStartChange}
-          className="absolute w-full h-1.5 opacity-0 cursor-pointer z-10"
-          style={{ pointerEvents: 'auto' }}
-          aria-label="Start of time range"
-        />
-        {/* End thumb — layered on top */}
-        <input
-          type="range"
-          min={0}
-          max={100}
-          step={0.1}
-          value={endPct}
-          onChange={handleEndChange}
-          className="absolute w-full h-1.5 opacity-0 cursor-pointer z-20"
-          aria-label="End of time range"
-        />
-        {/* Visible thumb markers */}
         <div
           className="absolute w-4 h-4 rounded-full bg-white border-2 border-[#0761d1] shadow-sm -translate-x-1/2 pointer-events-none"
-          style={{ left: `${startPct}%` }}
-        />
-        <div
-          className="absolute w-4 h-4 rounded-full bg-white border-2 border-[#0761d1] shadow-sm -translate-x-1/2 pointer-events-none"
-          style={{ left: `${endPct}%` }}
+          style={{ left: `${progress}%` }}
         />
       </div>
-
-      <div className="flex justify-between mt-1">
-        <span className="font-mono text-xs text-[#888888]">{fmtDate(bounds.min)}</span>
-        <span className="font-mono text-xs text-[#888888]">{fmtDate(bounds.max)}</span>
-      </div>
+      {timestamps.length === 1 && <p className="mt-1 text-xs text-[#888888]">Only one dated event is available.</p>}
     </div>
+  );
+}
+
+function friendlyLabel(value) {
+  return String(value).replace(/[_-]+/g, ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function friendlyValue(value) {
+  if (value === null || value === undefined || value === '') return '—';
+  if (Array.isArray(value)) return value.map(friendlyValue).join(', ');
+  if (typeof value === 'object') {
+    return Object.entries(value).map(([key, item]) => `${friendlyLabel(key)}: ${friendlyValue(item)}`).join(' · ');
+  }
+  return String(value);
+}
+
+function FriendlyFields({ values }) {
+  return (
+    <dl className="mt-2 divide-y divide-[#ebebeb] rounded-md border border-[#ebebeb] bg-[#fafafa]">
+      {Object.entries(values || {}).map(([key, value]) => (
+        <div key={key} className="grid grid-cols-[minmax(110px,0.4fr)_1fr] gap-3 px-3 py-2 text-sm">
+          <dt className="font-mono text-xs text-[#4d4d4d]">{friendlyLabel(key)}</dt>
+          <dd className="break-words text-[#171717]">{friendlyValue(value)}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+export function SimilarCasesPanel({ leads, navigate, currentCaseId, onUpdateLeadStatus }) {
+  const [updatingId, setUpdatingId] = useState(null);
+  const [reasons, setReasons] = useState({});
+  const [unavailableId, setUnavailableId] = useState(null);
+
+  if (!leads || leads.length === 0) return null;
+
+  const handleStatusChange = async (matchedCaseId, newStatus) => {
+    if (!newStatus) return;
+    setUpdatingId(matchedCaseId);
+    try {
+      const res = await apiClient.patch(`/cases/${encodeURIComponent(currentCaseId)}/similar-leads/${encodeURIComponent(matchedCaseId)}/status`, {
+        status: newStatus,
+        reason: reasons[matchedCaseId] || ''
+      });
+      if (res.data?.success) {
+        if (onUpdateLeadStatus) onUpdateLeadStatus(matchedCaseId, newStatus);
+      }
+    } catch (err) {
+      console.error('Failed to update semantic lead status', err);
+      alert(err.response?.data?.error?.message || 'Failed to update semantic lead status.');
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const openCase = async (matchedCaseId) => {
+    if (!matchedCaseId) {
+      setUnavailableId('__missing__');
+      return;
+    }
+    setUnavailableId(null);
+    try {
+      const response = await apiClient.post(`/cases/${encodeURIComponent(currentCaseId)}/similar-leads/${encodeURIComponent(matchedCaseId)}/reviewed`);
+      if (response.data?.success) navigate(`/cases/${encodeURIComponent(matchedCaseId)}`);
+    } catch (error) {
+      if (error.response?.status === 404) setUnavailableId(matchedCaseId);
+      else alert(error.response?.data?.error?.message || 'Could not open the referenced case.');
+    }
+  };
+
+  return (
+    <section
+      className="mt-8 overflow-hidden rounded-xl bg-white"
+      style={{ boxShadow: '0 0 0 1px rgba(0,0,0,0.08), 0px 2px 2px rgba(0,0,0,0.04), 0px 8px 16px -4px rgba(0,0,0,0.04)' }}
+      aria-label="Similar Cases"
+    >
+      <div className="flex items-center justify-between border-b border-[#ebebeb] px-6 py-3">
+        <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Similar cases detected</p>
+      </div>
+      <div className="divide-y divide-[#ebebeb]">
+        {leads.map((lead, idx) => {
+          const matchedId = lead.matchedCaseId;
+          const score = typeof lead.similarityScore === 'number' ? lead.similarityScore : 0;
+          const isHighMatch = score >= 0.90;
+
+          return (
+            <div key={idx} className="flex flex-col sm:flex-row sm:items-start justify-between p-6 gap-4 hover:bg-[#fafafa] transition-colors">
+              <div className="flex-1 space-y-3">
+                <div className="flex items-center gap-3">
+                  <h4 className="font-mono text-sm font-semibold text-[#171717]">
+                    {matchedId || 'Referenced case unavailable'}
+                  </h4>
+                  <StatusBadge status={isHighMatch ? (lead.investigatorStatus || 'possible_connection') : 'similar_case_lead'} />
+                  {typeof lead.similarityScore === 'number' && (
+                    <span className="font-mono text-xs text-[#065f46] bg-[#d1fae5] px-2 py-0.5 rounded-full">
+                      {Math.round(score * 100)}% Match
+                    </span>
+                  )}
+                </div>
+                {lead.rationale && (
+                  <div>
+                    <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Rationale</p>
+                    <p className="mt-1 text-sm text-[#4d4d4d] leading-5">{lead.rationale}</p>
+                  </div>
+                )}
+                <div>
+                  <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Model status</p>
+                  <p className="mt-1 text-sm text-[#4d4d4d]">{lead.status || 'Unknown'}</p>
+                </div>
+                {lead.matchingFacts && lead.matchingFacts.length > 0 && (
+                  <div>
+                    <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Matching Facts</p>
+                    <ul className="mt-1 list-disc list-inside text-sm text-[#4d4d4d] space-y-1">
+                      {lead.matchingFacts.map((fact, i) => <li key={i}>{fact}</li>)}
+                    </ul>
+                  </div>
+                )}
+                {lead.sharedConcepts && lead.sharedConcepts.length > 0 && (
+                  <div>
+                    <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Shared Concepts</p>
+                    <div className="mt-1 flex flex-wrap gap-2">
+                      {lead.sharedConcepts.map((concept, i) => (
+                        <span key={i} className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-[#f3f4f6] text-[#374151]">
+                          {concept}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {lead.exactIdentifierOverlap && lead.exactIdentifierOverlap.length > 0 && (
+                  <div>
+                    <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Exact Identifier Overlap</p>
+                    <div className="mt-1 flex flex-wrap gap-2">
+                      {lead.exactIdentifierOverlap.map((id, i) => (
+                        <span key={i} className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-[#fee2e2] text-[#991b1b] border border-[#fca5a5]">
+                          {id}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                
+                {!isHighMatch && (
+                  <div className="mt-3 text-xs text-[#ab570a] bg-[#ffefcf] p-2 rounded border border-[#ffd380]">
+                    <span className="font-bold">Review Warning:</span> This case was flagged as a potential semantic lead, but falls below the confidence threshold for automated relationship proposals.
+                  </div>
+                )}
+              </div>
+              <div className="shrink-0 flex flex-col gap-3 min-w-[200px]">
+                <button
+                  type="button"
+                  onClick={() => openCase(matchedId)}
+                  className="h-8 w-full rounded-md bg-[#171717] px-3 text-sm font-medium text-white transition-colors hover:bg-black"
+                >
+                  Open case
+                </button>
+                {(unavailableId === matchedId || (!matchedId && unavailableId === '__missing__')) && (
+                  <p role="alert" className="text-sm text-[#c50000]">The referenced case is unavailable</p>
+                )}
+                
+                {isHighMatch && (
+                  <div className="mt-2">
+                    <label className="block font-mono text-xs uppercase tracking-wide text-[#888888] mb-1">
+                      Investigator Status
+                    </label>
+                    <select
+                      value={lead.investigatorStatus || 'unspecified'}
+                      onChange={(e) => handleStatusChange(matchedId, e.target.value)}
+                      disabled={updatingId === matchedId}
+                      className="block w-full rounded-md border border-[#ebebeb] bg-white px-3 py-1.5 text-sm text-[#171717] shadow-sm focus:border-[#171717] focus:outline-none focus:ring-1 focus:ring-[#171717] disabled:opacity-50"
+                    >
+                      <option value="unspecified">Unspecified (System default)</option>
+                      <option value="verified" disabled={!lead.referencedCaseReviewedAt}>Verified</option>
+                      <option value="possible_connection">Possible connection</option>
+                      <option value="cross_connection" disabled={!lead.referencedCaseReviewedAt}>Cross-case connection</option>
+                      <option value="unverified">Unverified</option>
+                      <option value="unknown">Unknown</option>
+                    </select>
+                    {!lead.referencedCaseReviewedAt && (
+                      <p className="mt-1 text-xs text-[#888888]">Open and review the referenced case before verifying or marking a cross-case connection.</p>
+                    )}
+                    <label className="mt-3 block font-mono text-xs uppercase tracking-wide text-[#888888]" htmlFor={`semantic-note-${idx}`}>Investigator note</label>
+                    <input
+                      id={`semantic-note-${idx}`}
+                      value={reasons[matchedId] || ''}
+                      onChange={(event) => setReasons((current) => ({ ...current, [matchedId]: event.target.value }))}
+                      className="mt-1 h-9 w-full rounded-md border border-[#ebebeb] bg-white px-3 text-sm text-[#171717]"
+                      placeholder="Reason for this decision"
+                    />
+                    {updatingId === matchedId && <span className="text-xs text-[#888888] mt-1 block">Saving...</span>}
+                  </div>
+                )}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
   );
 }
 
@@ -385,6 +975,7 @@ export default function CaseDetailPage() {
       const payload = res.data?.data ?? null;
       const events = Array.isArray(payload?.timeline) ? payload.timeline : [];
       setTimelineEvents(events);
+      setActiveTimeRange(null);
       setTimelineTotal(typeof payload?.totalEvents === 'number' ? payload.totalEvents : events.length);
       setTimelineStatus(events.length === 0 ? 'empty' : 'ready');
     } catch (err) {
@@ -539,6 +1130,31 @@ export default function CaseDetailPage() {
     [fetchGuardrail, selectedEdgeId, closeGuardrailPanel, closeEntityPanel]
   );
 
+  const handleTimelineStatusChange = useCallback((edgeId, newStatus, saved) => {
+    const updateEdge = (edge) => {
+      if (edge?.id !== edgeId && edge?.edgeId !== edgeId) return edge;
+      return {
+        ...edge,
+        reviewStatus: newStatus,
+        effectiveStatus: newStatus || edge.systemStatus || edge.guardrailStatus || 'unknown',
+        latestNote: saved?.latestNote ?? edge.latestNote,
+        reviewAudit: saved?.reviewAudit ?? edge.reviewAudit,
+      };
+    };
+    setTimelineEvents((events) => events.map(updateEdge));
+    setGraphData((current) => current ? { ...current, edges: (current.edges || []).map(updateEdge) } : current);
+    setGuardrailData((current) => {
+      if (!current?.edge || (current.edgeId !== edgeId && current.edge.id !== edgeId && current.edge.edgeId !== edgeId)) return current;
+      return { ...current, edge: updateEdge(current.edge) };
+    });
+
+    if (saved) {
+      fetchGraph();
+      fetchTimeline();
+      if (selectedEdgeId === edgeId) fetchGuardrail(edgeId);
+    }
+  }, [fetchGraph, fetchTimeline, fetchGuardrail, selectedEdgeId]);
+
   useEffect(() => {
     if (caseId) {
       fetchGraph();
@@ -556,32 +1172,30 @@ export default function CaseDetailPage() {
   const isEmptyGraph =
     fetchStatus === 'ready' && graph.flowNodes.length === 0 && graph.flowEdges.length === 0;
 
-  // Derive min/max timestamps from edges for the scrubber
+  // Derive min/max timestamps from events for the scrubber
   const edgeTimeBounds = useMemo(() => {
-    const edges = graphData?.edges || [];
-    const timestamps = edges
-      .map(e => e.timestamp ? new Date(e.timestamp).getTime() : null)
-      .filter(t => t !== null && !isNaN(t));
-    if (timestamps.length === 0) return null;
-    return { min: Math.min(...timestamps), max: Math.max(...timestamps), timestamps };
-  }, [graphData]);
+    const events = timelineEvents || [];
+    const timestamps = Array.from(new Set(events
+      .map(e => e.eventDate ? new Date(e.eventDate).getTime() : null)
+      .filter(t => t !== null && !isNaN(t)))).sort((a, b) => a - b);
+      
+    if (timestamps.length === 0) return { min: null, max: null, timestamps: [] };
+    if (timestamps.length === 1) return { min: timestamps[0], max: timestamps[0], timestamps };
+    return { min: timestamps[0], max: timestamps[timestamps.length - 1], timestamps };
+  }, [timelineEvents]);
 
   return (
     <div className="min-h-screen bg-[#fafafa]">
       {/* Nav bar */}
       <header className="h-16 bg-white border-b border-[#ebebeb] flex items-center justify-between px-6">
-        <div 
-          onClick={() => navigate('/cases')} 
-          className="flex items-center gap-2 cursor-pointer transition-opacity hover:opacity-80"
-          title="Go to dashboard"
-        >
+        <Link to="/cases" className="flex items-center gap-2 hover:opacity-80 transition-opacity">
           <svg className="h-6 w-6 text-[#171717]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
             <path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" />
           </svg>
           <span className="font-sans text-lg font-bold tracking-tight text-[#171717]">
             Trace-X
           </span>
-        </div>
+        </Link>
         <div className="flex items-center gap-3">
           <span className="text-sm text-[#4d4d4d]">
             {user?.username ? `Signed in as ${user.username}` : ''}
@@ -679,6 +1293,19 @@ export default function CaseDetailPage() {
           </section>
         )}
 
+        {fetchStatus === 'ready' && graphData?.textReports?.length > 0 && (
+          <section className="mt-8 rounded-xl bg-white px-6 py-5" style={{ boxShadow: CARD_SHADOW }} aria-label="Case source material">
+            {Array.isArray(graphData.textReports) && graphData.textReports.length > 0 && (
+              <details>
+                <summary className="cursor-pointer font-mono text-xs uppercase tracking-wide text-[#888888]">Original FIR / reports · {graphData.textReports.length}</summary>
+                <div className="mt-3 space-y-3">{graphData.textReports.map((report, index) => (
+                  <p key={index} className="whitespace-pre-wrap rounded-md bg-[#fafafa] px-4 py-3 text-sm leading-6 text-[#4d4d4d]">{report}</p>
+                ))}</div>
+              </details>
+            )}
+          </section>
+        )}
+
         {isEmptyGraph && (
           <section
             className="mt-8 rounded-xl bg-[#fafafa] px-8 py-16 text-center"
@@ -715,45 +1342,17 @@ export default function CaseDetailPage() {
                 graph: {graph.unmappedEdges.join('; ')}
               </div>
             )}
-            
-            {Array.isArray(graphData?.patterns) && graphData.patterns.length > 0 && (
-              <section className="mt-8 overflow-hidden rounded-xl bg-white" style={{ boxShadow: CARD_SHADOW }}>
-                <div className="border-b border-[#ebebeb] px-6 py-3">
-                  <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Investigative Patterns</p>
-                </div>
-                <div className="divide-y divide-[#ebebeb]">
-                  {graphData.patterns.map((pattern, idx) => (
-                    <div key={idx} className="p-6">
-                      <div className="flex items-center gap-3">
-                        <span className="inline-flex items-center rounded-full bg-[#f3f4f6] px-2.5 py-0.5 font-mono text-xs font-medium text-[#374151]">
-                          {pattern.patternType}
-                        </span>
-                        {typeof pattern.confidence === 'number' && (
-                          <span className="font-mono text-xs text-[#888888]">
-                            Confidence: {pattern.confidence}
-                          </span>
-                        )}
-                      </div>
-                      {typeof pattern.description === 'string' && pattern.description.trim() && (
-                        <p className="mt-3 text-sm leading-5 text-[#171717]">
-                          {pattern.description}
-                        </p>
-                      )}
-                      {(Array.isArray(pattern.relatedEntityIds) && pattern.relatedEntityIds.length > 0) && (
-                        <div className="mt-3">
-                          <p className="font-mono text-xs text-[#888888]">Related Entities:</p>
-                          <ul className="mt-1 flex flex-wrap gap-2">
-                            {pattern.relatedEntityIds.map(eid => (
-                              <li key={eid} className="font-mono text-xs text-[#4d4d4d]">{eid}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </section>
-            )}
+
+            <ManualRelationshipForm
+              caseId={caseId}
+              nodes={graphData?.nodes || []}
+              onCreated={(savedEdge) => {
+                setGraphData((current) => current ? { ...current, edges: [...(current.edges || []), savedEdge] } : current);
+                setTimelineEvents((current) => [...current, savedEdge]);
+                fetchGraph();
+                fetchTimeline();
+              }}
+            />
 
             <section
               className="mt-8 overflow-hidden rounded-xl bg-white"
@@ -770,6 +1369,7 @@ export default function CaseDetailPage() {
               <div className="h-[560px] w-full">
                 <NetworkGraph 
                   graphData={{ nodes: graphData?.nodes || [], edges: graphData?.edges || [] }}
+                  patterns={graphData?.patterns || []}
                   onNodeClick={(id) => handleNodeClick(null, { id })}
                   onEdgeClick={(id) => handleEdgeClick(null, { id })}
                   onBackgroundClick={handleBackgroundClick}
@@ -844,7 +1444,7 @@ export default function CaseDetailPage() {
 
             {timelineStatus === 'empty' && (
               <div className="px-8 py-12 text-center">
-                <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">No timeline events</p>
+                <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">No dated investigation events</p>
                 <h3 className="mt-3 text-base font-semibold tracking-[-0.28px] text-[#171717]">
                   No dated interactions recorded.
                 </h3>
@@ -855,21 +1455,49 @@ export default function CaseDetailPage() {
             )}
 
             {timelineStatus === 'ready' && (
-              <ol className="divide-y divide-[#ebebeb] bg-[#fafafa]">
-                {timelineEvents.map((event, index) => (
-                  <TimelineEventRow 
-                    key={event.id || index} 
-                    event={event} 
-                    index={index} 
-                    getEntityName={getEntityName} 
-                    onClick={() => {
-                      if (event.id || event.edgeId) {
-                        handleEdgeClick(null, { id: event.id || event.edgeId });
-                      }
-                    }}
-                  />
-                ))}
-              </ol>
+              <>
+                <ol className="divide-y divide-[#ebebeb] bg-[#fafafa]">
+                  {timelineEvents.filter(e => e.eventDate).map((event, index) => (
+                    <TimelineEventRow 
+                      key={event.id || index} 
+                      event={event} 
+                      index={index} 
+                      getEntityName={getEntityName} 
+                      caseId={caseId}
+                      onStatusChange={handleTimelineStatusChange}
+                      onClick={() => {
+                        if (event.id || event.edgeId) {
+                          handleEdgeClick(null, { id: event.id || event.edgeId });
+                        }
+                      }}
+                    />
+                  ))}
+                </ol>
+                {timelineEvents.filter(e => !e.eventDate).length > 0 && (
+                  <details open className="mt-8 border-t border-[#ebebeb]">
+                    <summary className="cursor-pointer bg-white px-6 py-4 font-mono text-xs uppercase tracking-wide text-[#888888]">
+                      Undated evidence · {timelineEvents.filter(e => !e.eventDate).length}
+                    </summary>
+                    <ol className="divide-y divide-[#ebebeb] bg-[#fafafa]">
+                      {timelineEvents.filter(e => !e.eventDate).map((event, index) => (
+                        <TimelineEventRow 
+                          key={`undated-${event.id || index}`} 
+                          event={event} 
+                          index={index} 
+                          getEntityName={getEntityName} 
+                          caseId={caseId}
+                          onStatusChange={handleTimelineStatusChange}
+                          onClick={() => {
+                            if (event.id || event.edgeId) {
+                              handleEdgeClick(null, { id: event.id || event.edgeId });
+                            }
+                          }}
+                        />
+                      ))}
+                    </ol>
+                  </details>
+                )}
+              </>
             )}
           </section>
         )}
@@ -1015,9 +1643,7 @@ export default function CaseDetailPage() {
                     Object.keys(entityData.entity.attributes).length > 0 && (
                       <div>
                         <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Attributes</p>
-                        <pre className="mt-1 max-h-48 overflow-auto rounded-md border border-[#ebebeb] bg-[#fafafa] px-3 py-2 font-mono text-xs leading-5 text-[#4d4d4d]">
-                          {JSON.stringify(entityData.entity.attributes, null, 2)}
-                        </pre>
+                        <FriendlyFields values={entityData.entity.attributes} />
                       </div>
                     )}
                   {entityData.entity.createdAt && (
@@ -1153,7 +1779,7 @@ export default function CaseDetailPage() {
                       <p className="mt-1 truncate font-mono text-sm text-[#171717]" title={`${guardrailData.edge.source ?? ''} → ${guardrailData.edge.target ?? ''}`}>
                         {guardrailData.edge.source && guardrailData.edge.target ? (
                           <>
-                            {guardrailData.edge.source} <span className="text-[#a1a1a1]">→</span> {guardrailData.edge.target}
+                            {getEntityName(guardrailData.edge.source)} <span className="text-[#a1a1a1]">→</span> {getEntityName(guardrailData.edge.target)}
                           </>
                         ) : (
                           guardrailData.edge.source || guardrailData.edge.target || '—'
@@ -1164,18 +1790,7 @@ export default function CaseDetailPage() {
                   {typeof guardrailData.edge.edgeType === 'string' && guardrailData.edge.edgeType.trim() && (
                     <div>
                       <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Edge type</p>
-                      <p className="mt-1 text-sm text-[#171717]">
-                        {
-                          {
-                            shared_phone: 'Shared Phone',
-                            shared_address: 'Shared Address',
-                            telecom_link: 'Telecom Link',
-                            'co-mention': 'Co-Mention',
-                            owns: 'Ownership',
-                            associated_with: 'Associated With'
-                          }[guardrailData.edge.edgeType] || guardrailData.edge.edgeType
-                        }
-                      </p>
+                      <p className="mt-1 text-sm text-[#171717]">{guardrailData.edge.edgeType}</p>
                     </div>
                   )}
                   {typeof guardrailData.edge.confidence === 'number' && (
@@ -1184,46 +1799,82 @@ export default function CaseDetailPage() {
                       <p className="mt-1 font-mono text-sm text-[#171717]">{guardrailData.edge.confidence}</p>
                     </div>
                   )}
-                  {guardrailData.edge.timestamp && (
+                  {(guardrailData.edge.eventDate || guardrailData.edge.eventTime) && (
                     <div>
-                      <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Timestamp</p>
+                      <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Event date and time</p>
                       <p className="mt-1 font-mono text-xs text-[#4d4d4d]">
-                        {formatTimelineTimestamp(guardrailData.edge.timestamp) ?? String(guardrailData.edge.timestamp)}
+                        {[guardrailData.edge.eventDate, guardrailData.edge.eventTime].filter(Boolean).join(' ')}
                       </p>
                     </div>
                   )}
-                  {typeof guardrailData.edge.guardrailStatus === 'string' && guardrailData.edge.guardrailStatus.trim() && (
+                  {typeof guardrailData.edge.originalStatus === 'string' && guardrailData.edge.originalStatus.trim() && (
                     <div>
-                      <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Status</p>
-                      <div className="mt-1">
-                        {guardrailData.edge.guardrailStatus === 'verified' ? (
-                          <span className="inline-flex items-center rounded-full bg-[#d1fae5] px-2.5 py-0.5 font-mono text-xs font-medium text-[#065f46]">
-                            Verified Fact
-                          </span>
-                        ) : guardrailData.edge.guardrailStatus === 'possible_connection' ? (
-                          <span className="inline-flex items-center rounded-full bg-[#ffefcf] px-2.5 py-0.5 font-mono text-xs font-medium text-[#ab570a]">
-                            Unconfirmed Lead
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center rounded-full bg-[#f3f4f6] px-2.5 py-0.5 font-mono text-xs font-medium text-[#374151]">
-                            {guardrailData.edge.guardrailStatus}
-                          </span>
-                        )}
-                      </div>
+                      <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Original model status</p>
+                      <p className="mt-1 font-mono text-sm text-[#171717]">{guardrailData.edge.originalStatus}</p>
                     </div>
                   )}
+                  <div>
+                    <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Effective Status</p>
+                    <div className="mt-2">
+                      <StatusBadge status={guardrailData.edge.effectiveStatus || 'unknown'} />
+                    </div>
+                  </div>
+                  <div>
+                    <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Manual Review Status</p>
+                    <div className="mt-2 max-w-xs">
+                      <EdgeReviewDropdown
+                        caseId={caseId}
+                        edgeId={guardrailData.edgeId || selectedEdgeId}
+                        currentStatus={guardrailData.edge.reviewStatus || guardrailData.edge.effectiveStatus || guardrailData.edge.originalStatus || 'unknown'}
+                        onStatusChange={(newStatus, saved) => {
+                          setGuardrailData(prev => ({
+                            ...prev,
+                            edge: { ...prev.edge, reviewStatus: newStatus, effectiveStatus: newStatus, latestNote: saved?.latestNote, reviewAudit: saved?.reviewAudit || prev.edge.reviewAudit }
+                          }));
+                          // also update graph data if needed
+                          setGraphData(prev => {
+                            if (!prev) return prev;
+                            return {
+                              ...prev,
+                              edges: prev.edges.map(e => e.id === (guardrailData.edgeId || selectedEdgeId) ? { ...e, reviewStatus: newStatus } : e)
+                            };
+                          });
+                          if (saved) {
+                            fetchGraph();
+                            fetchGuardrail(guardrailData.edgeId || selectedEdgeId);
+                          }
+                        }}
+                      />
+                    </div>
+                  </div>
                   {typeof guardrailData.edge.guardrailRationale === 'string' && guardrailData.edge.guardrailRationale.trim() && (
                     <div>
                       <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Verification</p>
                       <p className="mt-1 text-sm leading-5 text-[#4d4d4d]">{guardrailData.edge.guardrailRationale}</p>
                     </div>
                   )}
+                  {guardrailData.edge.relationReason && (
+                    <div><p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Relationship reason</p><p className="mt-1 text-sm text-[#4d4d4d]">{guardrailData.edge.relationReason}</p></div>
+                  )}
+                  {guardrailData.edge.latestNote && (
+                    <div><p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Latest investigator note</p><p className="mt-1 text-sm text-[#4d4d4d]">{guardrailData.edge.latestNote}</p></div>
+                  )}
+                  {Array.isArray(guardrailData.edge.reviewAudit) && guardrailData.edge.reviewAudit.length > 0 && (
+                    <div>
+                      <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Audit history</p>
+                      <ol className="mt-2 space-y-2">{guardrailData.edge.reviewAudit.map((entry, index) => (
+                        <li key={`${entry.reviewedAt}-${index}`} className="rounded-md border border-[#ebebeb] bg-[#fafafa] px-3 py-2 text-sm text-[#4d4d4d]">
+                          <span className="font-medium text-[#171717]">{friendlyLabel(entry.previousStatus)} → {friendlyLabel(entry.newStatus)}</span>
+                          {entry.note ? ` — ${entry.note}` : ''}
+                          <span className="mt-1 block font-mono text-xs text-[#888888]">{entry.reviewedBy || 'Investigator'} · {formatTimelineTimestamp(entry.reviewedAt) || entry.reviewedAt}</span>
+                        </li>
+                      ))}</ol>
+                    </div>
+                  )}
                   {guardrailData.edge.attributes && typeof guardrailData.edge.attributes === 'object' && Object.keys(guardrailData.edge.attributes).length > 0 && (
                     <div>
                       <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Attributes</p>
-                      <pre className="mt-1 max-h-48 overflow-auto rounded-md border border-[#ebebeb] bg-[#fafafa] px-3 py-2 font-mono text-xs leading-5 text-[#4d4d4d]">
-                        {JSON.stringify(guardrailData.edge.attributes, null, 2)}
-                      </pre>
+                      <FriendlyFields values={guardrailData.edge.attributes} />
                     </div>
                   )}
                   <div>
@@ -1237,20 +1888,15 @@ export default function CaseDetailPage() {
                         {guardrailData.edge.evidence.map((item, idx) => (
                           <li key={idx} className="rounded-md border border-[#ebebeb] bg-[#fafafa] px-3 py-3">
                             {typeof item?.sourceReportId === 'string' && item.sourceReportId.trim() && (
-                              <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">Source: {item.sourceReportId}</p>
+                              <p className="font-mono text-xs uppercase tracking-wide text-[#888888]">
+                                Source Report: {item.sourceReportId}
+                              </p>
                             )}
                             {typeof item?.matchedField === 'string' && item.matchedField.trim() && (
-                              <p className="mt-1 font-mono text-xs text-[#171717]">Field: {item.matchedField}</p>
+                              <p className="mt-1 font-mono text-xs text-[#171717]">Matched Field: {item.matchedField}</p>
                             )}
-                            {item?.record !== undefined && item?.record !== null && (
-                              <pre className="mt-2 max-h-32 overflow-auto rounded border border-[#ebebeb] bg-white px-2 py-2 font-mono text-xs leading-5 text-[#4d4d4d]">
-                                {typeof item.record === 'string' ? item.record : JSON.stringify(item.record, null, 2)}
-                              </pre>
-                            )}
-                            {item?.metadata && typeof item.metadata === 'object' && Object.keys(item.metadata).length > 0 && (
-                              <pre className="mt-2 max-h-32 overflow-auto rounded border border-[#ebebeb] bg-white px-2 py-2 font-mono text-xs leading-5 text-[#4d4d4d]">
-                                {JSON.stringify(item.metadata, null, 2)}
-                              </pre>
+                            {item?.record !== undefined && (
+                              <p className="mt-2 text-sm text-[#4d4d4d]">{friendlyValue(item.record)}</p>
                             )}
                           </li>
                         ))}
@@ -1261,6 +1907,26 @@ export default function CaseDetailPage() {
               </div>
             )}
           </section>
+        )}
+        {fetchStatus === 'ready' && graphData?.similarCaseLeads && graphData.similarCaseLeads.length > 0 && (
+          <SimilarCasesPanel 
+            leads={graphData.similarCaseLeads} 
+            navigate={navigate}
+            currentCaseId={caseId}
+            onUpdateLeadStatus={(matchedCaseId, status) => {
+              setGraphData(prev => {
+                if (!prev) return prev;
+                return {
+                  ...prev,
+                  similarCaseLeads: prev.similarCaseLeads.map(l => 
+                    l.matchedCaseId === matchedCaseId 
+                      ? { ...l, investigatorStatus: status } 
+                      : l
+                  )
+                };
+              });
+            }}
+          />
         )}
       </main>
     </div>

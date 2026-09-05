@@ -67,3 +67,13 @@ const authMiddleware = (req, res, next) => {
 };
 
 module.exports = authMiddleware;
+
+module.exports.requireInvestigator = (req, res, next) => {
+  if (req.user?.role !== "investigator") {
+    return res.status(403).json({
+      success: false,
+      error: { code: "FORBIDDEN", message: "Investigator role required" },
+    });
+  }
+  return next();
+};

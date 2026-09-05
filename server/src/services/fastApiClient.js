@@ -1,91 +1,97 @@
+"use strict";
+
 const env = require("../../config/env");
 const { AppError } = require("../utils/AppError");
 
 /**
- * Custom error class representing FastAPI transport & upstream communication failures
+ * Custom error class for FastAPI transport & upstream communication failures.
+ * Matches AppError constructor: (message, code, statusCode, details)
  */
 class FastApiError extends AppError {
-  constructor(message, statusCode = 502, code = "FASTAPI_UPSTREAM_ERROR", details = null) {
+  constructor(message, code = "FASTAPI_UPSTREAM_ERROR", statusCode = 502, details = null) {
     super(message, code, statusCode, details);
   }
 }
 
 /**
- * Sends a normalized case intake payload to Argha's FastAPI reasoning core
+ * Sends a normalized case intake payload to the FastAPI reasoning core.
  *
- * @param {Object} normalizedCase - Case intake payload
- * @param {string} normalizedCase.caseId - Case identifier
- * @param {string[]} normalizedCase.textReports - Array of text reports
- * @param {Array<Record<string, any>>} normalizedCase.csvRecords - Array of parsed CSV objects
- * @param {Array<{ canonicalId: string, type: string, lastSeenCaseId: string }>} [normalizedCase.caseHistory]
- *   Previously resolved canonical entities passed for cross-case recurrence detection.
- *   Gateway fetches this from MongoDB and injects it so the reasoning service stays stateless.
- * @param {Object} [options] - Optional overrides (e.g. for testing)
- * @param {string} [options.baseUrl] - Custom base URL
- * @param {number} [options.timeoutMs] - Custom timeout in milliseconds
- * @returns {Promise<{ caseId: string, entities: any[], relationships: any[], patterns: any[], guardrail: any[] }>}
+ * Request payload (CaseRequest Pydantic contract):
+ *   caseId           — unique case identifier
+ *   caseName         — human-readable case name (from intake title)
+ *   caseCategory     — investigation category (e.g. "Fraud", "Terrorism")
+ *   textReports      — full current FIR / report text array
+ *   csvRecords       — parsed current CSV/CDR records
+ *   caseHistory      — exact normalized-identifier matches from previous cases
+ *   retrievalContext — up to 3 bounded historical case summaries + FIR excerpts
+ *
+ * Response fields mapped back:
+ *   entities, relationships, patterns, guardrail — existing fields
+ *   retrievalSummary                             — NEW: AI-generated summary
+ *   similarCaseLeads                             — NEW: Chroma semantic leads
+ *
+ * @param {Object} normalizedCase
+ * @param {Object} [options]  Optional overrides for testing (baseUrl, timeoutMs)
+ * @returns {Promise<Object>}
  */
 const callFastAPI = async (normalizedCase, options = {}) => {
-  const baseUrl = options.baseUrl !== undefined ? options.baseUrl : env.FASTAPI_BASE_URL;
+  const baseUrl   = options.baseUrl !== undefined ? options.baseUrl : env.FASTAPI_BASE_URL;
   const timeoutMs = options.timeoutMs || env.FASTAPI_TIMEOUT_MS || 60000;
 
   if (!baseUrl || typeof baseUrl !== "string" || !baseUrl.trim()) {
     throw new FastApiError(
       "FASTAPI_BASE_URL is not configured in environment variables",
-      500,
-      "FASTAPI_CONFIG_ERROR"
+      "FASTAPI_CONFIG_ERROR",
+      500
     );
   }
 
-  // Construct target endpoint
   const endpoint = `${baseUrl.replace(/\/+$/, "")}/case`;
 
-  // Construct exact clean request payload matching the full CaseRequest Pydantic contract:
-  // { caseId, textReports, csvRecords, caseHistory }
+  // ── Build request payload ────────────────────────────────────────────────
   const requestPayload = {
-    caseId: normalizedCase.caseId,
-    textReports: Array.isArray(normalizedCase.textReports) ? normalizedCase.textReports : [],
-    csvRecords: Array.isArray(normalizedCase.csvRecords) ? normalizedCase.csvRecords : [],
-    // caseHistory: inject previously resolved canonical entities so the reasoning service
-    // can perform cross-case recurrence detection without querying MongoDB directly.
-    caseHistory: Array.isArray(normalizedCase.caseHistory) ? normalizedCase.caseHistory : [],
+    caseId:       normalizedCase.caseId,
+    caseName:     typeof normalizedCase.caseName     === "string" ? normalizedCase.caseName     : "",
+    caseCategory: typeof normalizedCase.caseCategory === "string" ? normalizedCase.caseCategory : "",
+    textReports:  Array.isArray(normalizedCase.textReports)  ? normalizedCase.textReports  : [],
+    csvRecords:   Array.isArray(normalizedCase.csvRecords)   ? normalizedCase.csvRecords   : [],
+    caseHistory:  Array.isArray(normalizedCase.caseHistory)  ? normalizedCase.caseHistory  : [],
+    retrievalContext: Array.isArray(normalizedCase.retrievalContext)
+      ? normalizedCase.retrievalContext
+      : [],
   };
 
-  // Build request headers
+  // ── Request headers ──────────────────────────────────────────────────────
   const headers = {
     "Content-Type": "application/json",
-    Accept: "application/json",
+    Accept:         "application/json",
   };
-
-  // Optional internal shared secret header (only if configured in environment)
   if (env.FASTAPI_INTERNAL_SECRET) {
     headers["X-Internal-Secret"] = env.FASTAPI_INTERNAL_SECRET;
   }
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const timeoutId  = setTimeout(() => controller.abort(), timeoutMs);
 
   let response;
   try {
     response = await fetch(endpoint, {
-      method: "POST",
+      method:  "POST",
       headers,
-      body: JSON.stringify(requestPayload),
-      signal: controller.signal,
+      body:    JSON.stringify(requestPayload),
+      signal:  controller.signal,
     });
   } catch (err) {
     clearTimeout(timeoutId);
 
-    // Timeout detection
     if (err.name === "AbortError" || err.name === "TimeoutError") {
       throw new FastApiError(
         `FastAPI request timed out after ${timeoutMs}ms`,
-        504,
-        "FASTAPI_TIMEOUT"
+        "FASTAPI_TIMEOUT",
+        504
       );
     }
 
-    // Network / connection refusal / DNS errors
     const isConnRefused =
       err.code === "ECONNREFUSED" ||
       err.code === "ENOTFOUND" ||
@@ -96,40 +102,35 @@ const callFastAPI = async (normalizedCase, options = {}) => {
     if (isConnRefused) {
       throw new FastApiError(
         `FastAPI service is unavailable at ${endpoint}`,
-        502,
         "FASTAPI_UNAVAILABLE",
+        502,
         err.message
       );
     }
 
     throw new FastApiError(
       `Failed to communicate with FastAPI: ${err.message}`,
-      502,
       "FASTAPI_TRANSPORT_ERROR",
+      502,
       err.message
     );
   } finally {
     clearTimeout(timeoutId);
   }
 
-  // Handle upstream HTTP error responses (4xx, 5xx)
+  // ── Upstream HTTP errors ─────────────────────────────────────────────────
   if (!response.ok) {
     let errorBody = "";
-    try {
-      errorBody = await response.text();
-    } catch {
-      // Ignore reading error body
-    }
-
+    try { errorBody = await response.text(); } catch { /* ignore */ }
     throw new FastApiError(
       `FastAPI upstream returned error HTTP ${response.status}`,
-      502,
       "FASTAPI_UPSTREAM_ERROR",
+      502,
       { status: response.status, body: errorBody }
     );
   }
 
-  // Parse and validate response JSON
+  // ── Parse response JSON ──────────────────────────────────────────────────
   let responseData;
   try {
     const rawText = await response.text();
@@ -140,31 +141,36 @@ const callFastAPI = async (normalizedCase, options = {}) => {
   } catch (err) {
     throw new FastApiError(
       `FastAPI returned invalid or non-JSON response: ${err.message}`,
-      502,
-      "FASTAPI_INVALID_RESPONSE"
+      "FASTAPI_INVALID_RESPONSE",
+      502
     );
   }
 
   if (typeof responseData !== "object" || responseData === null || Array.isArray(responseData)) {
     throw new FastApiError(
       "FastAPI returned malformed response payload (expected object)",
-      502,
-      "FASTAPI_INVALID_RESPONSE"
+      "FASTAPI_INVALID_RESPONSE",
+      502
     );
   }
 
-  // Return draft logical structure preserving all returned AI fields
+  // ── Return normalized response ───────────────────────────────────────────
   return {
-    caseId: responseData.caseId || normalizedCase.caseId,
-    entities: Array.isArray(responseData.entities) ? responseData.entities : [],
-    relationships: Array.isArray(responseData.relationships) ? responseData.relationships : [],
-    patterns: Array.isArray(responseData.patterns) ? responseData.patterns : [],
-    guardrail: Array.isArray(responseData.guardrail) ? responseData.guardrail : [],
+    caseId:           responseData.caseId || normalizedCase.caseId,
+    entities:         Array.isArray(responseData.entities)      ? responseData.entities      : [],
+    relationships:    Array.isArray(responseData.relationships) ? responseData.relationships : [],
+    patterns:         Array.isArray(responseData.patterns)      ? responseData.patterns      : [],
+    guardrail:        Array.isArray(responseData.guardrail)     ? responseData.guardrail     : [],
+    // New FastAPI response fields
+    retrievalSummary: typeof responseData.retrievalSummary === "string"
+      ? responseData.retrievalSummary
+      : null,
+    similarCaseLeads: Array.isArray(responseData.similarCaseLeads)
+      ? responseData.similarCaseLeads
+      : [],
+    // Forward all other fields for future extensibility
     ...responseData,
   };
 };
 
-module.exports = {
-  callFastAPI,
-  FastApiError,
-};
+module.exports = { callFastAPI, FastApiError };
